@@ -1,0 +1,138 @@
+/*
+ * frontend/src/styles/index.css
+ *
+ * PURPOSE
+ * -------
+ * Global stylesheet for the Privo frontend.
+ * Imported once in main.tsx — applies to the entire application.
+ *
+ * Contains:
+ *   1. Tailwind CSS directives (required for Tailwind to work)
+ *   2. Global base overrides (box-sizing, font smoothing)
+ *   3. Scrollbar styling for dark theme consistency
+ *
+ * WHY TAILWIND DIRECTIVES HERE AND NOT ELSEWHERE?
+ * ------------------------------------------------
+ * @tailwind base, @tailwind components, @tailwind utilities are
+ * Tailwind's injection points. Vite's PostCSS pipeline processes
+ * these directives and replaces them with the actual CSS classes.
+ * Without these three lines, no Tailwind utility class works.
+ */
+
+/* ── TAILWIND DIRECTIVES ──────────────────────────────────────── */
+
+@tailwind base;
+/* Tailwind's CSS reset. Normalises default browser styles so
+   the app looks consistent across Chrome, Firefox, and Safari.
+   Removes default margins, normalises font sizes, etc. */
+
+@tailwind components;
+/* Tailwind's component layer. Empty by default — used for
+   custom reusable class groups added with @layer components. */
+
+@tailwind utilities;
+/* Tailwind's utility classes. This is where bg-slate-950,
+   text-violet-400, rounded-xl, etc. all come from. */
+
+
+/* ── GLOBAL BASE STYLES ───────────────────────────────────────── */
+
+@layer base {
+    /*
+    @layer base: adds styles to Tailwind's base layer.
+    These run after the Tailwind reset, before utilities.
+    Utilities can still override these.
+  */
+
+    *,
+    *::before,
+    *::after {
+        box-sizing: border-box;
+        /*
+      box-sizing: border-box: padding and border are included in
+      an element's declared width and height. Without this, a div
+      with width:100% and padding:16px would overflow its container.
+      This is the most important global CSS rule — it makes layout
+      predictable. Tailwind's reset includes this, but we declare
+      it explicitly for clarity.
+    */
+    }
+
+    html {
+        -webkit-text-size-adjust: 100%;
+        /*
+      Prevents iOS Safari from automatically increasing font sizes
+      when the device is in landscape orientation. Without this,
+      text on a phone in landscape mode can appear larger than
+      intended, breaking the layout.
+    */
+    }
+
+    body {
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        /*
+      Font smoothing: makes text render crisply on dark backgrounds.
+      antialiased uses a lighter stroke weight, which reads better
+      on dark backgrounds than the default subpixel rendering.
+      Most design-forward apps enable this globally.
+    */
+        background-color: #020617;
+        /*
+      slate-950: Sets the body background so there is no white flash
+      on initial load before React mounts and App.tsx renders its
+      bg-slate-950 class. Without this, users on slower connections
+      briefly see a white background.
+    */
+    }
+
+    img,
+    video {
+        max-width: 100%;
+        display: block;
+        /*
+      max-width: 100%: Images never overflow their container.
+      display: block: Removes the small gap below inline images
+      caused by the default inline baseline alignment.
+      Essential for the image preview in UploadZone.
+    */
+    }
+}
+
+
+/* ── CUSTOM SCROLLBAR (Webkit) ────────────────────────────────── */
+/*
+  The default OS scrollbar looks out of place on a dark UI.
+  These rules style the scrollbar to match Privo's dark theme
+  on Chrome, Safari, and Edge (Webkit-based scrollbar API).
+  Firefox uses a different API (scrollbar-color property).
+  These are progressive enhancement — no functionality is lost
+  if the browser ignores them.
+*/
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.2);
+    /* slate-400 at 20% opacity — visible but unobtrusive */
+    border-radius: 9999px;
+    /* Fully rounded pill shape */
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.4);
+    /* Slightly more visible on hover */
+}
+
+/* Firefox scrollbar */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.2) transparent;
+}
