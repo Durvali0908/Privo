@@ -1,5 +1,5 @@
 # Privo - Automatic Claude Handoff
-# Creates a snapshot of the current Git/project state.
+# Creates a snapshot of Git state + project context.
 
 $ErrorActionPreference = "Stop"
 
@@ -23,11 +23,23 @@ $commit = git rev-parse --short HEAD
 $status = git status --short
 $recentCommits = git log -5 --oneline
 
+# Read existing project status
+$projectStatus = ""
+
+if (Test-Path "PROJECT_STATUS.md") {
+    $projectStatus = Get-Content "PROJECT_STATUS.md" -Raw
+}
+else {
+    $projectStatus = "PROJECT_STATUS.md was not found."
+}
+
 # Create automatic handoff file
 $handoff = @"
-# Privo - Automatic Handoff
+# Privo - Automatic Claude Handoff
 
 Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+
+---
 
 ## Current Git State
 
@@ -45,24 +57,42 @@ $recentCommits
 
 $status
 
+---
+
+## Project Context
+
+The following is the current project documentation:
+
+$projectStatus
+
+---
+
 ## Instructions for the Next Claude Session
 
 This project is being continued from another Claude session/account.
 
 Before making changes:
 
-1. Inspect the current project files.
-2. Read this handoff file.
+1. Read this entire handoff file.
+2. Inspect the current project files.
 3. Check the recent Git commits.
 4. Understand what has already been implemented.
 5. Do not undo existing work.
 6. Continue from the current project state.
 7. Follow the project's existing architecture and coding rules.
-8. Work one file at a time and wait for approval before moving to another file.
+8. Work one file at a time.
+9. Explain the reasoning before generating code.
+10. Wait for explicit approval before moving to another file.
 
 IMPORTANT:
+
 The Git repository is the source of truth for the actual code.
-This handoff file describes the latest automatically detected project state.
+
+PROJECT_STATUS.md contains the stable project context.
+
+This handoff file combines the Git state and project context
+so another Claude account can understand the project quickly.
+
 "@
 
 $handoff | Set-Content -Path "CLAUDE_HANDOFF.md" -Encoding UTF8
