@@ -1,0 +1,14 @@
+Privo running commands :
+
+# Terminal 1 — backend
+cd D:\Privo(_CEP_)\backend
+.venv\Scripts\activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 2 — frontend
+cd D:\Privo(_CEP_)\frontend
+npx expo start
+
+# Terminal 3 — USB tunnel (run once after connecting phone)
+adb reverse tcp:8000 tcp:8000
+adb reverse tcp:8081 tcp:8081
