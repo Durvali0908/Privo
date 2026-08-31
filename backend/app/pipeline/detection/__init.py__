@@ -1,0 +1,9 @@
+"""
+app/pipeline/detection/__init__.py
+
+Detection stage — finds privacy-relevant signals in image pixels.
+
+Modules:
+    roi_manager.py       → DetectedRegion type + ROIManager
+    detection_engine.py  → orchestrates face, QR, text detectors
+"""
