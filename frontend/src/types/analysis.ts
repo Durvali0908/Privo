@@ -273,6 +273,51 @@ export interface MetadataSummary {
  * All future fields are Optional so Week 2 responses (which do not
  * include them) remain valid without any frontend changes.
  */
+
+// ─────────────────────────────────────────────────────────────────
+// DETECTION TYPES (Week 3)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Type of signal detected in the image.
+ * Mirrors RegionType enum from roi_manager.py.
+ */
+export type RegionType = "face" | "qr_code" | "text";
+
+/**
+ * One detected privacy-relevant region.
+ * Mirrors DetectedRegionSchema from schemas/analysis.py.
+ * Coordinates are in pixels, origin = top-left corner.
+ */
+export interface DetectedRegion {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    region_type: RegionType;
+    confidence: number;        // 0.0 – 1.0
+    content: string | null;    // decoded QR content or OCR text; null for faces
+}
+
+/**
+ * Detection engine results envelope.
+ * Mirrors DetectionSummary from schemas/analysis.py.
+ *
+ * success=false → engine could not run (not that nothing was found).
+ * face_count=0 with success=true → no faces detected, valid result.
+ */
+export interface DetectionSummary {
+    success: boolean;
+    image_width: number;
+    image_height: number;
+    face_count: number;
+    qr_count: number;
+    text_count: number;
+    total_regions: number;
+    regions: DetectedRegion[];
+    error: string | null;
+}
+
 export interface AnalysisResponse {
     success: true;
     session_id: string;
@@ -289,8 +334,8 @@ export interface AnalysisResponse {
     // In Week 2 the analyze endpoint always returns non-null here
     metadata: MetadataSummary | null;
 
-    // Week 3+ — detection results (added when backend Week 3 ships)
-    // detection?: DetectionSummary
+    // Week 3 — detection engine results
+    detection: DetectionSummary | null;
 
     // Week 5+ — risk scoring results
     // risk?: RiskSummary

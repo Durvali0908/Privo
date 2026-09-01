@@ -54,7 +54,10 @@ class DetectedRegion(BaseModel):
 class ROIManager:
     """
     Collects DetectedRegion objects from all detectors.
-    Filters invalid regions. Returns a clean, deduplicated list.
+    Filters invalid regions (zero-dimension boxes). Returns a filtered list.
+    Deduplication (IoU-based) is deferred to the Signal Correlation Engine
+    in Week 5 — overlapping cross-detector regions carry correlation value
+    that must not be lost before that stage runs.
     """
 
     def __init__(self) -> None:

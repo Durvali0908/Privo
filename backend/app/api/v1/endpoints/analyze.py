@@ -1,383 +1,438 @@
 """
-app/schemas/analysis.py
+app/api/v1/endpoints/analyze.py
 
 PURPOSE
 -------
-Defines the API response schemas for Privo's analysis endpoints.
+The analyze endpoint — the primary HTTP route for Privo's analysis pipeline.
 
-A schema here means: the exact shape of the JSON that FastAPI
-sends to the React frontend. These are the public API contracts.
-
-─────────────────────────────────────────────────────────────────────
-WHY schemas/ IS SEPARATE FROM pipeline/
-─────────────────────────────────────────────────────────────────────
-pipeline/ models are internal contracts between engines.
-schemas/ models are external contracts with the frontend.
-
-They can share the same field names and types, but they are separate
-classes for a deliberate reason: internal models can change freely
-as the pipeline evolves. The API schema should only change when the
-frontend contract intentionally changes. Keeping them separate makes
-breaking API changes visible and deliberate.
-
-Example: MetadataFinding in metadata_vault.py is an internal model.
-MetadataFindingSchema here is its public API representation.
-In Week 2 they are identical in structure. They may diverge later.
+Receives an image from React, runs it through the pipeline,
+and returns a structured JSON response.
 
 ─────────────────────────────────────────────────────────────────────
-WEEK 2 ADDITIONS
+WEEK 2 CHANGES FROM WEEK 1
 ─────────────────────────────────────────────────────────────────────
-New schemas added:
-    MetadataFindingSchema → public representation of one privacy finding
-    MetadataSummary       → envelope holding findings + extraction status
+1. Import paths updated:
+       app.engine.trigger → app.pipeline.intake.trigger
+       app.engine.session → app.pipeline.intake.session
 
-Extended schema:
-    AnalysisResponse      → gains one new Optional field: metadata
+2. Two new imports:
+       MetadataExtractor from pipeline.extraction.metadata_extractor
+       MetadataVault     from pipeline.extraction.metadata_vault
 
-All Week 1 schemas are unchanged:
-    SettingsSnapshot, ErrorResponse, and all existing AnalysisResponse
-    fields remain exactly as they were.
+3. Two new dependency factories:
+       get_metadata_extractor() → MetadataExtractor
+       get_metadata_vault()     → MetadataVault
+
+4. Three new steps in the endpoint body (Steps 3, 4, 5):
+       Step 3: MetadataExtractor.extract(session.privo_frame)
+       Step 4: MetadataVault.classify(raw_metadata)
+       Step 5: SessionManager.update_metadata_findings(session_id, findings_dicts)
+
+5. AnalysisResponse now includes the metadata field (Step 6).
+
+All Week 1 logic is unchanged — validation, session creation,
+error handling patterns, dependency injection pattern, response
+construction for all Week 1 fields.
 
 ─────────────────────────────────────────────────────────────────────
-FULL WEEK 2 RESPONSE EXAMPLE
+WEEK 2 PIPELINE ORDER
 ─────────────────────────────────────────────────────────────────────
-{
-    "success": true,
-    "session_id": "PRIVO-SESSION-A3F8B21C",
-    "filename": "photo.jpg",
-    "source": "gallery",
-    "status": "pending",
-    "file_size_bytes": 2457600,
-    "settings_loaded": true,
-    "message": "photo.jpg received. Analysis pipeline ready.",
-    "settings": { ... },
-    "metadata": {
-        "extraction_success": true,
-        "total_findings": 3,
-        "findings": [
-            {
-                "category": "location_exposure",
-                "severity": "high",
-                "field_name": "GPSLatitude + GPSLongitude",
-                "value": "37.774900, -122.419400",
-                "explanation": "This image contains GPS coordinates...",
-                "is_combination": false
-            },
-            ...
-        ]
-    }
-}
+Step 1: TriggerEngine.validate_upload(file)
+        → validates input, produces PrivoFrame
+        → failure: return 400
 
-If extraction failed, metadata is still present but reflects failure:
-    "metadata": {
-        "extraction_success": false,
-        "total_findings": 0,
-        "findings": []
-    }
+Step 2: SessionManager.create_session(privo_frame)
+        → creates session, loads default settings
+        → failure: return 500
 
-If the endpoint is called from a future context where metadata has
-not yet run (e.g. a status poll), metadata is null:
-    "metadata": null
+Step 3: MetadataExtractor.extract(session.privo_frame)
+        → runs ExifTool, returns RawMetadata
+        → never raises: returns RawMetadata(extraction_success=False) on error
+        → pipeline always continues regardless of outcome
+
+Step 4: MetadataVault.classify(raw_metadata)
+        → classifies fields into List[MetadataFinding]
+        → returns empty list if extraction_success is False
+        → never raises
+
+Step 5: SessionManager.update_metadata_findings(session_id, findings_dicts)
+        → stores findings on the session for future engines to read
+        → serialises MetadataFinding objects to dicts via .model_dump()
+
+Step 6: Build AnalysisResponse with all fields including metadata
+        → return HTTP 200
+
+─────────────────────────────────────────────────────────────────────
+PIPELINE ORCHESTRATION NOTE (carried forward from Week 1)
+─────────────────────────────────────────────────────────────────────
+The endpoint currently orchestrates Steps 1–5 directly. This is
+appropriate for two pipeline steps (Week 1) and five steps (Week 2).
+
+When the pipeline reaches three or more sequential engine calls
+beyond the current five, extract a dedicated orchestrator:
+
+    app/pipeline/orchestrator.py → class PrivoPipeline
+        async def run(privo_frame: PrivoFrame) -> PipelineResult
+
+Do not build this now. Build it when the pipeline needs it.
 
 ─────────────────────────────────────────────────────────────────────
 HOW THIS FILE COMMUNICATES WITH OTHER MODULES
 ─────────────────────────────────────────────────────────────────────
-Imported by:
-    app/api/v1/endpoints/analyze.py
-        → builds AnalysisResponse from SessionData +
-          List[MetadataFinding] (converted to MetadataFindingSchema)
+Calls:
+    app/pipeline/intake/trigger.py    → TriggerEngine.validate_upload()
+    app/pipeline/intake/session.py    → SessionManager.create_session()
+                                        SessionManager.update_metadata_findings()
+    app/pipeline/extraction/
+        metadata_extractor.py         → MetadataExtractor.extract()
+        metadata_vault.py             → MetadataVault.classify()
 
-Consumed by:
-    React frontend (src/types/analysis.ts)
-        → TypeScript interfaces mirror these schemas exactly
-        → MetadataFindingSchema → interface MetadataFinding (TS)
-        → MetadataSummary       → interface MetadataSummary (TS)
-        → AnalysisResponse.metadata → MetadataSummary | null
-
-FUTURE SCHEMAS TO ADD IN THIS FILE
-------------------------------------
-DetectionResponse  → Week 3: detected regions and signal types
-RiskResponse       → Week 4: risk scores per exposure category
-HeatmapResponse    → Week 5: heatmap coordinates and overlay data
+Returns:
+    app/schemas/analysis.py           → AnalysisResponse (HTTP 200)
+                                        ErrorResponse in HTTPException (400/500)
 """
 
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request
 
-from app.pipeline.intake.trigger import InputSource
-# InputSource: enum of valid input sources (GALLERY, CAMERA, VIDEO).
-# Serialised as "gallery", "camera", or "video" in the JSON response.
+# UPDATED IMPORT PATHS (Week 2 migration: app.engine → app.pipeline.intake)
+from app.pipeline.intake.trigger import TriggerEngine, InputSource
+from app.pipeline.intake.session import SessionManager
 
-from app.pipeline.intake.session import SessionStatus
-# SessionStatus: enum of valid session lifecycle stages.
-# Serialised as "pending", "processing", "complete", or "terminated".
+# NEW WEEK 2 IMPORTS
+from app.pipeline.extraction.metadata_extractor import MetadataExtractor
+from app.pipeline.extraction.metadata_vault import MetadataVault
+
+from app.schemas.analysis import (
+    AnalysisResponse,
+    ErrorResponse,
+    SettingsSnapshot,
+    MetadataFindingSchema,
+    MetadataSummary,
+    DetectedRegionSchema,
+    DetectionSummary,
+)
+
+from app.pipeline.detection.detection_engine import DetectionEngine
+from app.pipeline.detection.roi_manager import RegionType
+
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+# Logger name = "privo.app.api.v1.endpoints.analyze"
+
+router = APIRouter()
 
 
 # ─────────────────────────────────────────────────────────────────
-# WEEK 1 SCHEMAS — UNCHANGED
+# DEPENDENCY FACTORIES
 # ─────────────────────────────────────────────────────────────────
 
-class SettingsSnapshot(BaseModel):
+def get_trigger_engine() -> TriggerEngine:
+    """Dependency factory for TriggerEngine."""
+    return TriggerEngine()
+
+
+def get_session_manager() -> SessionManager:
+    """Dependency factory for SessionManager."""
+    return SessionManager()
+
+
+def get_metadata_extractor() -> MetadataExtractor:
     """
-    A read-only snapshot of the session settings sent to the frontend.
+    Dependency factory for MetadataExtractor.
+
+    A new instance per request is correct — MetadataExtractor holds
+    no state between requests. All state lives in the temp file it
+    creates and deletes within a single extract() call.
+    """
+    return MetadataExtractor()
+
+
+def get_metadata_vault() -> MetadataVault:
+    """
+    Dependency factory for MetadataVault.
+
+    A new instance per request is correct — MetadataVault holds
+    no state. All classification logic is stateless.
+    """
+    return MetadataVault()
+
+
+# ─────────────────────────────────────────────────────────────────
+# ANALYZE ENDPOINT
+# POST /api/v1/analyze
+# ─────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/analyze",
+    response_model=AnalysisResponse,
+    summary="Upload an image for privacy analysis",
+    description=(
+        "Accepts an image file upload, validates it, creates an analysis "
+        "session, extracts and classifies metadata, and returns a structured "
+        "response including privacy findings from the image's metadata."
+    ),
+    tags=["Analysis"]
+)
+async def analyze(
+    request: Request,
+    file: UploadFile = File(..., description="Image file to analyse"),
+    engine: TriggerEngine = Depends(get_trigger_engine),
+    session_manager: SessionManager = Depends(get_session_manager),
+    extractor: MetadataExtractor = Depends(get_metadata_extractor),
+    vault: MetadataVault = Depends(get_metadata_vault),
+) -> AnalysisResponse:
+    """
+    Primary analysis endpoint — Week 2 pipeline orchestrator.
+
+    PIPELINE: validate → session → extract metadata → classify → respond
+
+    PARAMETERS
+    ----------
+    file : UploadFile
+        The uploaded image. Required — FastAPI returns 422 if absent.
+
+    engine : TriggerEngine
+        Injected via Depends(get_trigger_engine).
+
+    session_manager : SessionManager
+        Injected via Depends(get_session_manager).
+
+    extractor : MetadataExtractor
+        Injected via Depends(get_metadata_extractor).
+
+    vault : MetadataVault
+        Injected via Depends(get_metadata_vault).
+
+    RETURNS
+    -------
+    AnalysisResponse — HTTP 200 always when pipeline completes.
+    Metadata extraction failure does not cause an error response —
+    the pipeline degrades gracefully and metadata.extraction_success
+    reflects the outcome.
+
+    ERROR RESPONSES
+    ---------------
+    HTTP 400 — validation failure (bad file type, too large, etc.)
+    HTTP 500 — unexpected crash in TriggerEngine or SessionManager
+
+    Note: MetadataExtractor and MetadataVault failures are NOT 500
+    errors. They return graceful results and the response is still
+    HTTP 200 with metadata.extraction_success=False.
+    """
+
+    logger.info(f"Analyze endpoint: request received for '{file.filename}'")
+
+    # ── STEP 1: Trigger Engine Validation ─────────────────────────
+    try:
+        validation_result = await engine.validate_upload(file)
+    except Exception as exc:
+        logger.error(
+            f"Analyze endpoint: Trigger Engine raised an exception — {exc}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error_code="TRIGGER_ENGINE_ERROR",
+                message="An unexpected error occurred during file validation. Please try again.",
+                detail=None
+            ).model_dump()
+        )
+
+    # ── STEP 2a: Handle Validation Failure ────────────────────────
+    if not validation_result.valid:
+        logger.warning(
+            f"Analyze endpoint: validation failed | "
+            f"code={validation_result.error_code} | "
+            f"file='{file.filename}'"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                error_code=validation_result.error_code or "VALIDATION_FAILED",
+                message=validation_result.error_message or "File validation failed.",
+                detail=None
+            ).model_dump()
+        )
+
+    # ── STEP 2b: Session Creation ──────────────────────────────────
+    try:
+        session = session_manager.create_session(validation_result.privo_frame)
+    except Exception as exc:
+        logger.error(
+            f"Analyze endpoint: Session Manager raised an exception — {exc}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error_code="SESSION_CREATION_ERROR",
+                message="An unexpected error occurred while creating your session. Please try again.",
+                detail=None
+            ).model_dump()
+        )
+
+    # ── STEP 3: Metadata Extraction ───────────────────────────────
+    # MetadataExtractor.extract() never raises.
+    # On any internal failure it returns RawMetadata(extraction_success=False).
+    # The pipeline always continues — metadata failure is non-fatal.
+    raw_metadata = extractor.extract(session.privo_frame)
+    # We use session.privo_frame rather than validation_result.privo_frame.
+    # Both reference the same PrivoFrame object. Using session.privo_frame
+    # is semantically correct: by this point the frame belongs to the session.
+    # If the Session Manager ever pre-processes the frame in the future,
+    # session.privo_frame will reflect that; validation_result.privo_frame
+    # would not.
+
+    logger.info(
+        f"Analyze endpoint: metadata extraction done | "
+        f"session={session.session_id} | "
+        f"success={raw_metadata.extraction_success} | "
+        f"exiftool_fields={raw_metadata.field_count}"
+    )
+
+    # ── STEP 4: Metadata Classification ───────────────────────────
+    # MetadataVault.classify() never raises.
+    # Returns an empty list if raw_metadata.extraction_success is False.
+    findings = vault.classify(raw_metadata)
+
+    logger.info(
+        f"Analyze endpoint: metadata classification done | "
+        f"session={session.session_id} | "
+        f"findings={len(findings)}"
+    )
+
+    # ── STEP 5: Store Findings on Session ─────────────────────────
+    # Serialise MetadataFinding objects to plain dicts for storage.
+    # SessionData.metadata_findings is List[dict] — see session.py
+    # for the explanation of why dict is used instead of the typed model.
+    findings_dicts = [f.model_dump() for f in findings]
+    # model_dump(): converts a Pydantic model instance to a plain dict.
+    # ExposureCategory and FindingSeverity str enums serialise to their
+    # string values: "location_exposure", "high", etc.
+
+    stored = session_manager.update_metadata_findings(session.session_id, findings_dicts)
+    if not stored:
+        logger.warning(
+            f"Analyze endpoint: metadata findings could not be stored — "
+            f"session '{session.session_id}' not found in store. "
+            f"Findings will appear in this response but are not persisted."
+        )
+
+    # ── STEP 6: Detection Engine ──────────────────────────────────
+    detection_engine = DetectionEngine()
+    detection_result = detection_engine.detect(
+        frame=session.privo_frame,
+        face_mesh=getattr(request.app.state, "face_mesh", None),
+        ocr_enabled=True,
+    )
+
+    logger.info(
+        f"Analyze endpoint: detection done | "
+        f"session={session.session_id} | "
+        f"success={detection_result.success} | "
+        f"faces={detection_result.face_count} | "
+        f"qr={detection_result.qr_count} | "
+        f"text={detection_result.text_count}"
+    )
+
+    # ── STEP 7: Build the API Response ────────────────────────────
+    # Construct MetadataSummary from extraction results.
+    metadata_summary = MetadataSummary(
+        extraction_success=raw_metadata.extraction_success,
+        total_findings=len(findings),
+        findings=[
+            MetadataFindingSchema(
+                category=f.category.value,
+                # .value: converts ExposureCategory enum to its str value.
+                # ExposureCategory.LOCATION.value → "location_exposure"
+                # MetadataFindingSchema.category is str — not the enum type.
+                severity=f.severity.value,
+                # FindingSeverity.HIGH.value → "high"
+                field_name=f.field_name,
+                value=f.value,
+                explanation=f.explanation,
+                is_combination=f.is_combination,
+            )
+            for f in findings
+            # List comprehension: converts each MetadataFinding (internal model)
+            # to MetadataFindingSchema (public API schema) one by one.
+        ]
+    )
+
+    detection_summary = DetectionSummary(
+        success=detection_result.success,
+        image_width=detection_result.image_width,
+        image_height=detection_result.image_height,
+        face_count=detection_result.face_count,
+        qr_count=detection_result.qr_count,
+        text_count=detection_result.text_count,
+        total_regions=len(detection_result.regions),
+        regions=[
+            DetectedRegionSchema(
+                x=r.x,
+                y=r.y,
+                width=r.width,
+                height=r.height,
+                region_type=r.region_type.value,
+                confidence=r.confidence,
+                content=r.content,
+            )
+            for r in detection_result.regions
+        ],
+        error=detection_result.error,
+    )
+
+    response = AnalysisResponse(
+        success=True,
+        session_id=session.session_id,
+        filename=session.privo_frame.filename,
+        source=session.source,
+        status=session.status,
+        file_size_bytes=session.privo_frame.size_bytes,
+        settings_loaded=session.settings_loaded,
+        message=_build_success_message(session.source, session.privo_frame.filename),
+        settings=SettingsSnapshot(
+            theme=session.settings.theme,
+            scanning_mode=session.settings.scanning_mode,
+            metadata_retention=session.settings.metadata_retention,
+            analysis_history=session.settings.analysis_history,
+            cloud_processing=session.settings.cloud_processing,
+        ),
+        metadata=metadata_summary,
+        detection=detection_summary,
+    )
+
+    logger.info(
+        f"Analyze endpoint: response ready | "
+        f"session={session.session_id} | "
+        f"source={session.source.value} | "
+        f"findings={len(findings)} | "
+        f"extraction_success={raw_metadata.extraction_success} | "
+        f"faces={detection_result.face_count} | "
+        f"qr={detection_result.qr_count} | "
+        f"text={detection_result.text_count}"
+    )
+
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────
+# PRIVATE HELPERS
+# ─────────────────────────────────────────────────────────────────
+
+def _build_success_message(source: InputSource, filename) -> str:
+    """
+    Returns a source-aware success message for the frontend.
     Unchanged from Week 1.
     """
-    theme: str = Field(description="UI theme: 'light', 'dark', or 'system'")
-    scanning_mode: str = Field(description="Analysis intensity: 'fast', 'balanced', or 'thorough'")
-    metadata_retention: bool = Field(description="Whether metadata is included in analysis results")
-    analysis_history: bool = Field(description="Whether this session is stored in analysis history")
-    cloud_processing: bool = Field(description="Whether cloud AI processing is enabled")
-
-
-class ErrorResponse(BaseModel):
-    """
-    The JSON body inside FastAPI's HTTPException detail wrapper
-    for failed requests.
-
-    React reads this as: response.detail.error_code, response.detail.message
-    The outer { "detail": ... } wrapper is added by FastAPI automatically.
-    Unchanged from Week 1.
-    """
-    success: bool = Field(default=False)
-    error_code: str = Field(description="Machine-readable error code")
-    message: str = Field(description="Human-readable error message for display")
-    detail: Optional[str] = Field(default=None, description="Optional diagnostic context")
-
-
-# ─────────────────────────────────────────────────────────────────
-# WEEK 2 ADDITIONS — METADATA SCHEMAS
-# ─────────────────────────────────────────────────────────────────
-
-class MetadataFindingSchema(BaseModel):
-    """
-    Public API representation of one privacy finding from MetadataVault.
-
-    WHY NOT IMPORT MetadataFinding FROM metadata_vault.py DIRECTLY?
-    ---------------------------------------------------------------
-    MetadataFinding in metadata_vault.py is an internal pipeline model
-    that uses ExposureCategory and FindingSeverity enums from that file.
-    This schema uses plain strings for category and severity so the API
-    response is clean JSON without enum class references.
-
-    In Week 2 the fields are identical in both models.
-    If the internal model gains fields that should not be in the API
-    (e.g. internal scoring weights), this schema stays unchanged.
-
-    FIELDS
-    ------
-    category : str
-        Exposure category as a string: "location_exposure",
-        "identity_exposure", "activity_exposure", etc.
-        Matches ExposureCategory enum values from metadata_vault.py.
-
-    severity : str
-        Severity level as a string: "low", "medium", "high".
-        Matches FindingSeverity enum values from metadata_vault.py.
-
-    field_name : str
-        The metadata field(s) that produced this finding.
-        Examples: "GPSLatitude + GPSLongitude", "Make + Model"
-
-    value : str
-        The actual metadata value, formatted for display.
-
-    explanation : str
-        Non-technical explanation for the end user.
-
-    is_combination : bool
-        True when this finding was raised by two or more fields together.
-    """
-    category: str = Field(description="Exposure category identifier")
-    severity: str = Field(description="Finding severity: 'low', 'medium', or 'high'")
-    field_name: str = Field(description="Metadata field(s) that produced this finding")
-    value: str = Field(description="Formatted metadata value for display")
-    explanation: str = Field(description="Non-technical explanation for the user")
-    is_combination: bool = Field(
-        default=False,
-        description="True when raised by multiple fields together"
-    )
-
-
-class MetadataSummary(BaseModel):
-    """
-    Envelope for metadata extraction and classification results.
-
-    WHY AN ENVELOPE INSTEAD OF JUST List[MetadataFindingSchema]?
-    -------------------------------------------------------------
-    The frontend needs two pieces of information beyond the findings list:
-
-    1. extraction_success: did the extraction process work?
-       If False, the frontend can show "metadata could not be read"
-       rather than silently showing zero findings (which would imply
-       the image has clean metadata when in fact extraction failed).
-
-    2. total_findings: the count without requiring the frontend to
-       measure the list length. Convenient for UI badges and summaries.
-
-    FIELDS
-    ------
-    extraction_success : bool
-        True if ExifTool ran without error, regardless of finding count.
-        False if ExifTool was not found, timed out, or output was invalid.
-        Mirrors RawMetadata.extraction_success semantics exactly.
-
-    total_findings : int
-        len(findings). Provided as a convenience field.
-        The frontend can display "3 privacy concerns found" without
-        iterating the list.
-
-    findings : List[MetadataFindingSchema]
-        The complete list of privacy findings from the Metadata Vault.
-        Empty when extraction failed or the image has clean metadata.
-        The frontend must use extraction_success to distinguish these
-        two cases when total_findings is 0.
-    """
-    extraction_success: bool = Field(
-        description=(
-            "True if ExifTool ran without error. "
-            "False indicates an extraction process failure, not clean metadata."
-        )
-    )
-    total_findings: int = Field(
-        description="Total number of privacy findings found"
-    )
-    findings: List[MetadataFindingSchema] = Field(
-        description="Privacy findings from metadata classification"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────
-# ANALYSIS RESPONSE — EXTENDED WITH METADATA
-# ─────────────────────────────────────────────────────────────────
-
-class AnalysisResponse(BaseModel):
-    """
-    The complete JSON response for a successful POST /api/v1/analyze.
-
-    WEEK 2 CHANGE
-    -------------
-    One new optional field added: metadata.
-    All Week 1 fields are unchanged.
-
-    WHY Optional[MetadataSummary] AND NOT MetadataSummary?
-    -------------------------------------------------------
-    Optional means the field can be null in the JSON response.
-    This handles two future cases cleanly:
-
-    Case 1 — Week 2 analyze endpoint:
-        metadata is always populated (extraction runs every request).
-
-    Case 2 — Future session status endpoint:
-        GET /api/v1/session/{id}/status may reuse AnalysisResponse.
-        If the client polls before extraction completes, metadata=null
-        is a valid and honest response.
-
-    Case 3 — Future async pipeline:
-        If the pipeline becomes async (extraction runs in background),
-        metadata=null on the first response, populated on a later poll.
-
-    Making it Optional now costs nothing and prevents a future
-    breaking change to the schema.
-
-    FIELD ORDER
-    -----------
-    Fields are ordered to match the JSON response the frontend reads:
-    identity fields first, then pipeline status, then content.
-    """
-
-    # ── IDENTITY ──────────────────────────────────────────────────
-    success: bool = Field(description="Always true for this response type")
-
-    session_id: str = Field(
-        description="Unique session identifier, e.g. PRIVO-SESSION-A3F8B21C"
-    )
-
-    filename: Optional[str] = Field(
-        default=None,
-        description="Original filename, null for camera/video sources"
-    )
-
-    source: InputSource = Field(
-        description="Input source: 'gallery', 'camera', or 'video'"
-    )
-
-    # ── PIPELINE STATUS ───────────────────────────────────────────
-    status: SessionStatus = Field(
-        description="Current session lifecycle status"
-    )
-
-    file_size_bytes: Optional[int] = Field(
-        default=None,
-        description="File size in bytes, null if unavailable"
-    )
-
-    settings_loaded: bool = Field(
-        description="Confirms default settings were loaded for this session"
-    )
-
-    message: str = Field(
-        description="Human-readable status message"
-    )
-
-    # ── SETTINGS ──────────────────────────────────────────────────
-    settings: SettingsSnapshot = Field(
-        description="Settings applied to this analysis session"
-    )
-
-    # ── WEEK 2 ────────────────────────────────────────────────────
-    metadata: Optional[MetadataSummary] = Field(
-        default=None,
-        description=(
-            "Metadata extraction and classification results. "
-            "Null when metadata extraction has not yet run for this session."
-        )
-    )
-
-    # ── WEEK 3 ────────────────────────────────────────────────────
-    detection: Optional["DetectionSummary"] = Field(
-        default=None,
-        description=(
-            "Detection engine results. "
-            "Null when detection has not yet run for this session."
-        )
-    )
-
-# ─────────────────────────────────────────────────────────────────
-# WEEK 3 — DETECTION SCHEMAS
-# ─────────────────────────────────────────────────────────────────
-
-class DetectedRegionSchema(BaseModel):
-    """
-    Public API representation of one detected region.
-    Mirrors DetectedRegion from roi_manager.py using plain types.
-    """
-    x: int
-    y: int
-    width: int
-    height: int
-    region_type: str        # "face" | "qr_code" | "text"
-    confidence: float
-    content: Optional[str] = None
-
-
-class DetectionSummary(BaseModel):
-    """
-    Envelope for detection engine results.
-    Mirrors DetectionResult from detection_engine.py.
-
-    success=False means the engine could not run (not that nothing was found).
-    face_count=0 with success=True means no faces detected — valid result.
-    """
-    success: bool
-    image_width: int = Field(default=0)
-    image_height: int = Field(default=0)
-    face_count: int = Field(default=0)
-    qr_count: int = Field(default=0)
-    text_count: int = Field(default=0)
-    total_regions: int = Field(default=0)
-    regions: List[DetectedRegionSchema] = Field(default_factory=list)
-    error: Optional[str] = None
-
-
-# Rebuild AnalysisResponse to pick up the forward reference
-AnalysisResponse.model_rebuild()
+    if source == InputSource.GALLERY:
+        display_name = filename if filename else "Image"
+        return f"{display_name} received. Analysis pipeline ready."
+    elif source == InputSource.CAMERA:
+        return "Camera frame received. Analysis pipeline ready."
+    elif source == InputSource.VIDEO:
+        return "Video frame received. Analysis pipeline ready."
+    else:
+        return "Input received. Analysis pipeline ready."
