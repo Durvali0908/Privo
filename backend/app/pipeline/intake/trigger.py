@@ -1,713 +1,745 @@
 """
-backend/app/engine/session.py
+backend/app/engine/trigger.py
 
 PURPOSE
 -------
-The Session Manager is responsible for creating, storing, retrieving,
-and terminating analysis sessions.
+The Trigger Engine is Privo's entry-point gatekeeper.
 
-Every image analysis in Privo is wrapped in a session. The session is
-the identity that connects the Trigger Engine's output to the Detection
-Engine's input to the Risk Scoring Engine's results to the final export.
+Every image — whether from a gallery upload, a camera capture,
+or a future video stream — must pass through this engine first.
 
-Without sessions, Privo would be a stateless one-shot analyser with no
-ability to track pipeline progress, associate results with inputs, or
-support a user reviewing and acting on findings before saving.
+It performs three validation checks and returns a structured result.
+If validation fails at any step, the pipeline stops immediately.
+No other engine ever receives input that has not been validated here.
 
 ─────────────────────────────────────────────────────────────────────
-WHAT IS A SESSION?
+THE CORE ARCHITECTURAL DECISION IN THIS FILE
 ─────────────────────────────────────────────────────────────────────
-A session represents one complete analysis lifecycle:
+The Trigger Engine does NOT accept FastAPI's UploadFile directly as
+its internal type. Instead, it normalises every input source into a
+single shared container called PrivoFrame.
 
-    Image received → Session created → Pipeline runs →
-    Results stored in session → User acts → Session closed
+WHY?
 
-A session contains:
-- A unique identifier (PRIVO-SESSION-XXXXXXXX)
-- The normalised input (PrivoFrame from Trigger Engine)
-- The user's settings for this analysis
-- Timestamps (created, last updated)
-- Current status (pending → processing → complete → terminated)
-- Future: detection results, risk scores, heatmap data, export path
+FastAPI's UploadFile is specific to HTTP file uploads. A camera frame
+is raw bytes from a WebRTC or MediaStream. A video frame is a NumPy
+array from OpenCV. If the Trigger Engine accepted UploadFile internally,
+the entire pipeline would be permanently coupled to HTTP uploads — and
+rewriting it for Phase 2 (live camera) or Phase 3 (video) would require
+touching every engine in the stack.
 
-─────────────────────────────────────────────────────────────────────
-SESSION STORAGE IN WEEK 1
-─────────────────────────────────────────────────────────────────────
-Sessions are stored in a Python dictionary in memory:
-    { "PRIVO-SESSION-A3F8B21C": SessionData(...) }
-
-WHY IN-MEMORY STORAGE FOR WEEK 1?
------------------------------------
-- Zero dependencies: no database, no Redis, no external services
-- Zero configuration: works immediately without setup
-- Easy to inspect during development
-- Fast: dictionary lookups are O(1)
-
-LIMITATIONS OF IN-MEMORY STORAGE
-----------------------------------
-- Sessions are lost when the server restarts
-- Cannot be shared across multiple server processes
-- Not suitable for production at scale
-
-FUTURE MIGRATION PATH
-----------------------
-The SessionManager is designed so that only the storage layer needs
-to change — the rest of the application never calls the dict directly.
-All reads and writes go through SessionManager methods:
-    create_session(), get_session(), terminate_session()
-
-When the time comes to add Redis or a database, only those three
-methods change. No other module needs to be updated. This is the
-"encapsulation" principle applied to storage.
+With PrivoFrame:
+- The Detection Engine sees PrivoFrame. Always.
+- The Session Manager sees PrivoFrame. Always.
+- The source (gallery / camera / video) is just metadata on PrivoFrame.
+- Adding a new source means writing one new adapter method. Nothing else changes.
 
 ─────────────────────────────────────────────────────────────────────
-SESSION LIFECYCLE (for future modules to understand)
+THREE-PHASE INPUT STRATEGY
 ─────────────────────────────────────────────────────────────────────
-PENDING     → Session created, pipeline has not started yet
-PROCESSING  → Detection Engine / Risk Scoring is running
-COMPLETE    → All pipeline stages finished, results available
-TERMINATED  → Session explicitly closed by user or timeout
 
-The Memory Engine (future) will move COMPLETE sessions to
-persistent storage. The Session Termination Module (future) will
-remove TERMINATED sessions from memory to free up space.
+Phase 1 — Gallery (NOW):
+    User selects image file → React sends multipart/form-data →
+    FastAPI receives UploadFile → validate_upload() converts to PrivoFrame →
+    pipeline runs
+
+Phase 2 — Camera capture (FUTURE):
+    User opens camera in React PWA → captures a frame →
+    React sends raw bytes → validate_frame() converts to PrivoFrame →
+    same pipeline runs
+
+Phase 3 — Live video / continuous analysis (FUTURE):
+    Camera stream active → frames extracted at N fps →
+    each frame → validate_frame() → Detection Engine only
+    (no new session per frame — session persists for stream duration)
+
+In all three phases:
+    PrivoFrame → Trigger Engine → Detection Engine
+    The Detection Engine never changes. Only the source adapter changes.
 
 ─────────────────────────────────────────────────────────────────────
+VALIDATION CHECKS (in order, short-circuit on failure)
+─────────────────────────────────────────────────────────────────────
+1. Presence Check   — does the frame have content?
+2. Extension Check  — is the format in the allowed list? (gallery only)
+3. Size Check       — is the content under the maximum allowed size?
+
 HOW THIS FILE COMMUNICATES WITH OTHER MODULES
-─────────────────────────────────────────────────────────────────────
-Receives from:
+----------------------------------------------
+Called by:
     app/api/v1/endpoints/analyze.py
-        → passes result.privo_frame (from Trigger Engine)
-        → receives SessionData back
+        → passes UploadFile from React
+        → receives ValidationResult
+
+Produces:
+    PrivoFrame (normalised input for the rest of the pipeline)
+    ValidationResult (validation outcome for the endpoint)
 
 Reads from:
-    app/engine/trigger.py
-        → PrivoFrame (the normalised input container)
-        → InputSource (to tag the session with its origin)
-
     app/core/config.py
-        → default settings values to populate DefaultSettings
+        → settings.allowed_extensions
+        → settings.max_file_size_bytes
 
 Logs via:
     app/core/logging.py
-        → records session creation, retrieval, and termination
+        → records every validation step and outcome
 
 FUTURE MODULES THAT WILL DEPEND ON THIS FILE
 ---------------------------------------------
-- analyze.py endpoint   → calls create_session(), reads session_id
-- metadata_extractor    → calls get_session() to retrieve privo_frame
-- detection_engine      → calls get_session() to get frame + settings
-- risk_scoring_engine   → reads session.settings.scanning_mode
-- memory_engine         → calls get_session(), stores completed data
-- analytics_dashboard   → reads session history and status counts
-- session_termination   → calls terminate_session() on expiry/user close
+- session.py              → receives PrivoFrame after validation
+- detection_engine        → receives PrivoFrame (Week 3)
+- metadata_extractor      → reads PrivoFrame.filename and .source
+- roi_manager             → reads PrivoFrame.content (raw bytes)
+- camera_adapter (future) → calls validate_frame() with raw bytes
+- video_adapter (future)  → calls validate_frame() per video frame
 """
 
-import secrets
-# secrets: Python's cryptographically secure random number module.
-# Part of Python's standard library — no installation needed.
-#
-# WHY secrets AND NOT random?
-# random.random() and random.randint() are designed for simulations
-# and games — they use a predictable algorithm (Mersenne Twister).
-# Given enough outputs, an attacker can predict future values.
-# secrets uses the operating system's entropy source (os.urandom)
-# which is unpredictable and safe for security-sensitive tokens.
-# Session IDs are security-sensitive: a predictable session ID lets
-# an attacker guess another user's session and access their data.
-# Using secrets makes session IDs unguessable.
-#
-# WHY NOT uuid4?
-# uuid4() also uses os.urandom internally and is perfectly safe.
-# secrets.token_hex() is slightly more explicit about intent
-# (it's in the "secrets" module, signalling security purpose)
-# and produces a cleaner token format for our use case.
-
-from datetime import datetime, timezone
-# datetime: Python's date and time class.
-# Used to record when the session was created and last updated.
-#
-# timezone: Used to create timezone-aware datetime objects.
-# We always store UTC timestamps — never local time.
-#
-# WHY UTC?
-# Local time depends on the server's timezone setting, which can
-# vary between development (your laptop) and production (a cloud
-# server). UTC is consistent everywhere. The frontend converts
-# UTC to the user's local time for display.
-#
-# WHY timezone-aware?
-# Python datetime objects can be "naive" (no timezone info) or
-# "aware" (with timezone info). Naive datetimes are ambiguous and
-# cause subtle bugs when comparing times or calculating durations.
-# We always use aware datetimes: datetime.now(timezone.utc)
+import os
+# os: Python's operating system interface.
+# Used for os.path.splitext() to extract file extensions.
+# Example: os.path.splitext("photo.jpg") → ("photo", ".jpg")
 
 from enum import Enum
 # Enum: Python's enumeration base class.
-# Used to declare the fixed set of valid session statuses.
-# Same pattern as InputSource in trigger.py.
+# An Enum defines a fixed set of named values.
+# We use it to declare all valid input sources for Privo.
+# Why Enum instead of plain strings?
+#   - "gallery" can be mistyped as "Gallery" or "GALLERY" — no error.
+#   - InputSource.GALLERY cannot be mistyped — Python raises AttributeError.
+#   - IDEs autocomplete Enum values. They don't autocomplete strings.
+#   - Adding a new source means adding one line to InputSource.
+#     Every place in the codebase that checks the source type
+#     benefits immediately without hunting for string literals.
 
-from typing import Optional, Dict
-# Optional[X]: The value can be X or None.
-# Dict[K, V]: A dictionary mapping keys of type K to values of type V.
-# Used for the in-memory session store type annotation.
+from typing import Optional
+# Optional[X] means the value can be X or None.
+# Used for fields that may not be present for every input source.
+# Example: filename is meaningful for gallery uploads but not camera frames.
 
 from pydantic import BaseModel, Field
 # BaseModel: Foundation for all Privo data models.
-# Field: Adds metadata (defaults, descriptions) to model fields.
+# Provides type validation, serialisation, and IDE autocomplete.
+# Field: Adds metadata (default values, descriptions) to model fields.
+
+from fastapi import UploadFile
+# UploadFile: FastAPI's class representing a file uploaded via HTTP.
+# We receive this from the React frontend in Phase 1.
+# We convert it to PrivoFrame immediately — it does not travel
+# further into the pipeline in its original form.
 
 from app.core.config import settings
-# settings: Central configuration singleton.
-# We read default values from it to populate DefaultSettings.
+# settings: Central configuration singleton from config.py.
+# We read:
+#   settings.allowed_extensions  — list of valid extensions
+#   settings.max_file_size_bytes — computed from settings.max_file_size_mb
 
 from app.core.logging import get_logger
 # get_logger: Logging factory from logging.py.
-
-from app.pipeline.intake.trigger import TriggerEngine, PrivoFrame, InputSource
-# PrivoFrame: The normalised input container from the Trigger Engine.
-#   This is what the Session Manager receives and stores.
-# InputSource: The enum of valid input sources (GALLERY, CAMERA, VIDEO).
-#   We store this on the session so analytics can report by source type.
+# Returns a Logger namespaced under "privo.app.engine.trigger".
 
 logger = get_logger(__name__)
-# __name__ = "app.engine.session"
-# Logger name = "privo.app.engine.session"
+# __name__ = "app.engine.trigger"
+# Logger name = "privo.app.engine.trigger"
 
 
 # ─────────────────────────────────────────────────────────────────
-# SESSION STATUS ENUM
-# Declares the lifecycle stages of a Privo session.
+# INPUT SOURCE ENUM
+# Declares every valid input source Privo supports or will support.
+# The pipeline uses this to make source-aware decisions where needed.
 # ─────────────────────────────────────────────────────────────────
 
-class SessionStatus(str, Enum):
+class InputSource(str, Enum):
     """
-    The lifecycle status of a Privo analysis session.
+    Declares the known input sources for Privo's pipeline.
 
-    WHY AN ENUM?
-    ------------
-    Without an enum, status would be a plain string like "pending".
-    A developer could accidentally write "Pending" or "PENDING" or
-    "pendng" — Python wouldn't complain, and the bug would be silent.
-    With SessionStatus.PENDING, a typo is an AttributeError immediately.
+    WHY INHERIT FROM BOTH str AND Enum?
+    ------------------------------------
+    Inheriting from str makes each enum member behave like a string.
+    This means InputSource.GALLERY == "gallery" is True.
+    It also means Pydantic can serialise it directly to JSON as a string:
+        {"source": "gallery"}  not  {"source": "InputSource.GALLERY"}
+    This is important because PrivoFrame will be serialised to JSON
+    when the API response is built.
 
-    WHY INHERIT FROM str?
+    CURRENT MEMBERS
+    ---------------
+    GALLERY : Images selected from the device's photo library.
+              Arrive as UploadFile via multipart/form-data.
+              Have filenames and may have EXIF metadata.
+
+    CAMERA  : Single photo captured from the device camera.
+              Arrive as raw bytes via a future /capture endpoint.
+              May not have a filename. May have GPS from capture context.
+
+    VIDEO   : Individual frames extracted from a video stream.
+              Arrive as raw bytes from a future video analysis pipeline.
+              No filename. Frame index and timestamp are relevant instead.
+
+    ADDING A NEW SOURCE IN THE FUTURE
+    ----------------------------------
+    If Privo gains a screenshot analysis feature, add:
+        SCREENSHOT = "screenshot"
+    That's the only change needed in this file.
+    The pipeline picks it up automatically via PrivoFrame.source.
+    """
+
+    GALLERY = "gallery"
+    CAMERA  = "camera"
+    VIDEO   = "video"
+
+
+# ─────────────────────────────────────────────────────────────────
+# PRIVO FRAME — THE NORMALISED INPUT CONTAINER
+# This is the single type that flows through the entire pipeline.
+# Every input source is converted into a PrivoFrame before
+# entering validation. Everything downstream sees only PrivoFrame.
+# ─────────────────────────────────────────────────────────────────
+
+class PrivoFrame(BaseModel):
+    """
+    The normalised, source-agnostic input container for Privo's pipeline.
+
+    WHAT IS A PrivoFrame?
     ----------------------
-    Same reason as InputSource: str inheritance means Pydantic
-    serialises the value as a plain string in JSON:
-        {"status": "pending"}  not  {"status": "SessionStatus.PENDING"}
-    This is what the React frontend will receive and display.
+    Regardless of where an image comes from — a gallery upload,
+    a camera capture, or a video stream — by the time it enters
+    the Trigger Engine's validation logic, it is a PrivoFrame.
 
-    LIFECYCLE TRANSITIONS
-    ----------------------
-    PENDING     Initial state when session is first created.
-                The pipeline has not begun processing yet.
-                This is the state returned in Week 1.
+    Think of PrivoFrame as the "common language" all input sources
+    are translated into before the pipeline begins processing.
 
-    PROCESSING  Set when the Detection Engine begins analysing the frame.
-                Future: analyze.py will update status to PROCESSING
-                before starting the engine pipeline.
+    WHY NOT USE UploadFile DIRECTLY?
+    ---------------------------------
+    UploadFile is a FastAPI HTTP concept. It only exists in the context
+    of an HTTP multipart/form-data request. Camera frames and video
+    frames are not HTTP uploads — they arrive as raw bytes. If the
+    pipeline depended on UploadFile, it would break the moment we
+    added a camera input.
 
-    COMPLETE    Set when all pipeline stages have finished.
-                Future: the final stage (Risk Scoring or Heatmap Engine)
-                will update status to COMPLETE when results are ready.
-
-    TERMINATED  Set when the session is explicitly closed.
-                Future: Session Termination Module sets this on:
-                  - User closes the session manually
-                  - Session expiry timeout (settings.session_expiry_minutes)
-                  - Server shutdown cleanup
-    """
-
-    PENDING     = "pending"
-    PROCESSING  = "processing"
-    COMPLETE    = "complete"
-    TERMINATED  = "terminated"
-
-
-# ─────────────────────────────────────────────────────────────────
-# DEFAULT SETTINGS MODEL
-# Typed representation of the user's settings for this session.
-# Loaded from config.py defaults in Week 1.
-# Future: overridden by user preferences from a Settings UI.
-# ─────────────────────────────────────────────────────────────────
-
-class DefaultSettings(BaseModel):
-    """
-    The settings applied to one analysis session.
-
-    WHY A SEPARATE MODEL AND NOT A FLAT DICT?
-    ------------------------------------------
-    If settings were a plain dict attached to SessionData:
-        session.settings["scanning_mode"]
-    then every module that reads settings has to know the exact
-    key string. A typo ("scaning_mode") causes a KeyError at runtime.
-
-    As a typed Pydantic model:
-        session.settings.scanning_mode
-    is validated at construction time. IDEs autocomplete it.
-    The Detection Engine and Risk Scoring Engine can import
-    DefaultSettings and know exactly what fields are available.
-
-    IN WEEK 1
-    ---------
-    These values come from config.py (hardcoded defaults).
-    There is no Settings UI yet — all sessions use the same defaults.
-
-    IN THE FUTURE
-    -------------
-    When the Settings UI is built, the user's preferences will be
-    loaded here instead of the config defaults. The structure of
-    DefaultSettings remains unchanged — only the values change.
-    This means every engine that reads session.settings works
-    correctly without modification when personalised settings arrive.
-
-    FIELDS AND WHAT USES THEM
-    --------------------------
-    theme             → Frontend only. Backend ignores this.
-    scanning_mode     → Risk Scoring Engine: determines check intensity.
-    metadata_retention→ Metadata Extractor: whether to include EXIF data.
-    analysis_history  → Memory Engine: whether to persist session history.
-    cloud_processing  → Detection Engine: whether to use cloud ML models.
-    """
-
-    theme: str = Field(
-        default=settings.default_theme,
-        description="UI theme preference: 'light', 'dark', or 'system'"
-    )
-
-    scanning_mode: str = Field(
-        default=settings.default_scanning_mode,
-        description="Analysis intensity: 'fast', 'balanced', or 'thorough'"
-    )
-
-    metadata_retention: bool = Field(
-        default=settings.default_metadata_retention,
-        description="Whether to include metadata in analysis results"
-    )
-
-    analysis_history: bool = Field(
-        default=settings.default_analysis_history,
-        description="Whether to store this session in analysis history"
-    )
-
-    cloud_processing: bool = Field(
-        default=settings.default_cloud_processing,
-        description="Whether to use cloud AI processing (false = local only)"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────
-# SESSION DATA MODEL
-# The complete data container for one analysis session.
-# Created by SessionManager and passed through the entire pipeline.
-# ─────────────────────────────────────────────────────────────────
-
-class SessionData(BaseModel):
-    """
-    The complete data container for one Privo analysis session.
-
-    This is the object that flows through the entire pipeline after
-    the Trigger Engine's validation is complete.
-
-    Every engine in the pipeline receives this object, reads what it
-    needs, adds its results, and passes it to the next engine.
-
-    THINK OF IT AS A "WORK ORDER"
-    ------------------------------
-    When a car enters a repair shop, a work order is created.
-    It starts with: customer name, car details, reported problem.
-    As mechanics work on it, they add: findings, parts used, labour.
-    At the end: invoice, completion time, sign-off.
-
-    SessionData works the same way:
-    - Created with: session_id, privo_frame, settings, timestamps
-    - Detection Engine adds: detected regions (future)
-    - Risk Scoring Engine adds: risk scores (future)
-    - Heatmap Engine adds: heatmap data (future)
-    - Final Image Builder adds: output path (future)
+    PrivoFrame abstracts away the source. The Detection Engine doesn't
+    care if the bytes came from a file picker or a camera — it just
+    processes the bytes.
 
     FIELDS
     ------
-    session_id : str
-        Unique identifier. Format: "PRIVO-SESSION-XXXXXXXX"
-        where XXXXXXXX is 8 uppercase hex characters.
-        Generated by SessionManager._generate_session_id().
-
-    privo_frame : PrivoFrame
-        The normalised input from the Trigger Engine.
-        Contains the raw image bytes and source metadata.
-        This is what the Detection Engine reads for analysis.
+    content : bytes
+        The raw image data. This is what OpenCV, MediaPipe, YOLO,
+        and EasyOCR will all read in the future.
+        For gallery images: the full file bytes.
+        For camera frames: the JPEG-encoded frame bytes from the browser.
+        For video frames: the bytes of one decoded frame.
 
     source : InputSource
-        Copied from privo_frame.source for convenient top-level access.
-        Stored separately so analytics queries don't need to unpack
-        the full PrivoFrame to filter by source type.
+        Which input type produced this frame.
+        Used by:
+          - Trigger Engine: to decide which checks apply
+            (extension check only applies to gallery uploads)
+          - Session Manager: to tag the session with its origin
+          - Analytics Dashboard (future): to report usage by source type
+          - Metadata Extractor (future): gallery images have EXIF,
+            camera frames have GPS from the capture context instead
 
-    settings : DefaultSettings
-        The analysis settings for this session.
-        Read by: Detection Engine, Risk Scoring Engine, Memory Engine.
+    filename : Optional[str]
+        Original filename from the upload. Only meaningful for GALLERY.
+        None for CAMERA and VIDEO (frames don't have filenames).
+        Stored in session data for display and audit logging.
 
-    status : SessionStatus
-        Current lifecycle stage. Starts as PENDING.
-        Updated by each pipeline stage as processing progresses.
+    extension : Optional[str]
+        Lowercased extension without dot, e.g. "jpg", "png", "heic".
+        Extracted from filename for GALLERY inputs.
+        None for CAMERA and VIDEO.
+        Future use: Metadata Extractor uses this to select the right
+        ExifTool parser for the image format.
 
-    created_at : datetime
-        UTC timestamp of session creation.
-        Used by Session Termination Module to enforce expiry.
-        Used by Analytics Dashboard to report session volume over time.
+    frame_index : Optional[int]
+        For VIDEO source only.
+        The sequential number of this frame in the video stream.
+        Used by the future Video Adapter to track analysis progress
+        and by the Analytics Dashboard to report frame-level timing.
 
-    updated_at : datetime
-        UTC timestamp of the last status update.
-        Updated whenever status changes or results are added.
-        Useful for detecting stalled sessions (processing for too long).
-
-    settings_loaded : bool
-        Confirms that DefaultSettings were successfully loaded.
-        The React frontend reads this in Week 1 to confirm the
-        pipeline initialised correctly.
+    size_bytes : Optional[int]
+        The size of the content in bytes.
+        Computed from len(content) during PrivoFrame construction,
+        or passed in directly when size is known from the source.
+        Used by the size validation check and stored in session data.
     """
 
     model_config = {"arbitrary_types_allowed": True}
-    # Required because PrivoFrame contains bytes (raw binary data).
-    # Pydantic needs this flag to allow non-standard field types.
+    # arbitrary_types_allowed: Pydantic normally only accepts types it
+    # knows how to validate (str, int, bool, etc.).
+    # bytes is supported natively, but this config flag is set
+    # explicitly as documentation: PrivoFrame holds raw binary data.
 
-    session_id: str = Field(description="Unique session identifier")
+    content: bytes = Field(description="Raw image bytes")
 
-    privo_frame: PrivoFrame = Field(description="Normalised input from Trigger Engine")
+    source: InputSource = Field(description="Which input source produced this frame")
 
-    source: InputSource = Field(description="Input source type for this session")
-
-    settings: DefaultSettings = Field(description="Analysis settings for this session")
-
-    status: SessionStatus = Field(
-        default=SessionStatus.PENDING,
-        description="Current lifecycle status of the session"
+    filename: Optional[str] = Field(
+        default=None,
+        description="Original filename, only present for GALLERY source"
     )
 
-    created_at: datetime = Field(description="UTC timestamp of session creation")
+    extension: Optional[str] = Field(
+        default=None,
+        description="Lowercased extension without dot, e.g. 'jpg'"
+    )
 
-    updated_at: datetime = Field(description="UTC timestamp of last update")
+    frame_index: Optional[int] = Field(
+        default=None,
+        description="Frame number in a video stream, only for VIDEO source"
+    )
 
-    settings_loaded: bool = Field(
-        default=True,
-        description="Confirms default settings were loaded successfully"
+    size_bytes: Optional[int] = Field(
+        default=None,
+        description="Size of content in bytes"
     )
 
 
 # ─────────────────────────────────────────────────────────────────
-# SESSION MANAGER
-# Creates, stores, retrieves, and terminates sessions.
+# VALIDATION RESULT — STRUCTURED OUTPUT OF TRIGGER ENGINE
 # ─────────────────────────────────────────────────────────────────
 
-class SessionManager:
+class ValidationResult(BaseModel):
     """
-    The Session Manager — creates and manages Privo analysis sessions.
+    The structured result returned by every TriggerEngine validation method.
 
-    RESPONSIBILITY
-    --------------
-    1. Generate unique, unguessable session IDs
-    2. Load default settings for the session
-    3. Build a SessionData object from a validated PrivoFrame
-    4. Store the session in memory
-    5. Provide retrieval and termination methods
+    WHY A PYDANTIC MODEL?
+    ----------------------
+    A plain dict like {"valid": True} has no type guarantee.
+    ValidationResult guarantees:
+    - result.valid is always bool
+    - result.privo_frame is always PrivoFrame or None
+    - result.error_code is always str or None
+    The API endpoint, Session Manager, and future engines can all rely
+    on this contract without defensive checks like:
+        if "valid" in result and result["valid"] == True: ...
 
-    STORAGE
-    -------
-    Sessions are stored in a class-level dictionary:
-        SessionManager._store: Dict[str, SessionData]
-
-    WHY CLASS-LEVEL (not instance-level)?
+    HOW THIS TRAVELS THROUGH THE PIPELINE
     ---------------------------------------
-    If _store were an instance variable (self._store = {}), then
-    every time the endpoint created a new SessionManager(), it would
-    get a fresh empty store — all previous sessions would be invisible.
+    analyze.py:
+        result = engine.validate_upload(file)
+        if not result.valid:
+            raise HTTPException(400, result.error_message)
+        # Pass result.privo_frame to Session Manager:
+        session = session_manager.create_session(result.privo_frame)
 
-    A class-level variable is shared across ALL instances of the class.
-    Whether you create one SessionManager or ten, they all read from
-    and write to the same _store dictionary.
+    FIELDS
+    ------
+    valid : bool
+        True if all applicable checks passed. False otherwise.
 
-    This is a simple form of the "Singleton" pattern for storage.
+    privo_frame : Optional[PrivoFrame]
+        The normalised input container, populated only when valid=True.
+        This is what flows downstream to the Session Manager and engines.
+        None when valid=False (no point passing invalid data forward).
 
-    FUTURE MIGRATION
-    ----------------
-    When Redis or a database replaces the dict, only these methods
-    change: create_session(), get_session(), terminate_session().
-    No other file in the project needs to be updated.
+    error_code : Optional[str]
+        Machine-readable failure code. None when valid=True.
+        Examples: "MISSING_FILE", "UNSUPPORTED_EXTENSION", "FILE_TOO_LARGE"
+        Used by the endpoint to categorise failures for logging/analytics.
+
+    error_message : Optional[str]
+        Human-readable failure explanation. None when valid=True.
+        This is shown to the user in the React frontend.
     """
 
-    _store: Dict[str, SessionData] = {}
-    # Dict[str, SessionData]:
-    #   Keys   → session_id strings like "PRIVO-SESSION-A3F8B21C"
-    #   Values → SessionData objects
-    #
-    # This dict lives at the CLASS level, not the instance level.
-    # It persists for the lifetime of the running server process.
+    valid: bool = Field(description="True if all validation checks passed")
 
-    def create_session(self, privo_frame: PrivoFrame) -> SessionData:
+    privo_frame: Optional[PrivoFrame] = Field(
+        default=None,
+        description="Normalised input container, populated only when valid=True"
+    )
+
+    error_code: Optional[str] = Field(
+        default=None,
+        description="Machine-readable error code, None when valid"
+    )
+
+    error_message: Optional[str] = Field(
+        default=None,
+        description="Human-readable error message, None when valid"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# TRIGGER ENGINE
+# ─────────────────────────────────────────────────────────────────
+
+class TriggerEngine:
+    """
+    The Trigger Engine — Privo's entry-point gatekeeper.
+
+    Provides source-specific entry points (validate_upload, validate_frame)
+    that each convert their input into a PrivoFrame, then delegate to the
+    shared internal validation logic.
+
+    PUBLIC INTERFACE
+    ----------------
+    validate_upload(file: UploadFile) → ValidationResult
+        Entry point for Phase 1 (gallery / file picker).
+        Converts UploadFile → PrivoFrame → validates.
+
+    validate_frame(content: bytes, source: InputSource, ...) → ValidationResult
+        Entry point for Phase 2 and 3 (camera / video).
+        Wraps raw bytes → PrivoFrame → validates.
+
+    INTERNAL LOGIC
+    --------------
+    _validate_privo_frame(frame: PrivoFrame) → ValidationResult
+        The shared validation core. Both public methods call this.
+        Runs: presence check → extension check (gallery only) → size check.
+
+    WHY TWO PUBLIC METHODS?
+    -----------------------
+    validate_upload and validate_frame have different inputs but the same
+    validation logic. Separating them at the public interface keeps the
+    caller's code clean (no source-specific branching in the endpoint),
+    while sharing the validation core avoids duplication.
+
+    In Phase 2, the camera endpoint will call:
+        engine.validate_frame(frame_bytes, InputSource.CAMERA)
+    It never touches validate_upload. The endpoint code is clean.
+    """
+
+    # ── PUBLIC ENTRY POINT: GALLERY / FILE UPLOAD ─────────────────
+
+    async def validate_upload(self, file: UploadFile) -> ValidationResult:
         """
-        Creates a new analysis session from a validated PrivoFrame.
+        Entry point for Phase 1: gallery image uploads.
 
-        This is the primary method called by the analyze.py endpoint
-        after the Trigger Engine returns a successful ValidationResult.
+        Reads the UploadFile, converts it to a PrivoFrame, then
+        delegates to the shared validation logic.
+
+        WHY async?
+        ----------
+        FastAPI's UploadFile.read() is a coroutine — it must be awaited.
+        The bytes are read from the HTTP request body asynchronously.
+        This is why the method is async: it must await file.read().
+
+        All other validation methods are synchronous because they
+        work with data that is already in memory (bytes, not streams).
 
         PARAMETERS
         ----------
-        privo_frame : PrivoFrame
-            The validated, normalised input from the Trigger Engine.
-            Must have already passed all Trigger Engine checks.
-            This is the single source of truth for the session's input.
+        file : UploadFile
+            The file object provided by FastAPI from the HTTP request.
 
         RETURNS
         -------
-        SessionData
-            A fully populated session object, already stored in memory.
-            The endpoint serialises this to build the JSON response.
-
-        WHAT HAPPENS INSIDE
-        --------------------
-        1. Generate a unique session ID
-        2. Load default settings from config.py
-        3. Record the current UTC time as both created_at and updated_at
-        4. Build the SessionData object
-        5. Store it in _store
-        6. Return it
-
-        USAGE IN analyze.py
-        --------------------
-        manager = SessionManager()
-        session = manager.create_session(result.privo_frame)
-        return {"session_id": session.session_id, "status": session.status}
+        ValidationResult with privo_frame populated if valid=True.
         """
-        session_id = self._generate_session_id()
+        logger.info(f"Trigger Engine: validating gallery upload — '{file.filename}'")
 
-        now = datetime.now(timezone.utc)
-        # datetime.now(timezone.utc): current time in UTC.
-        # We pass timezone.utc explicitly to get a timezone-aware object.
-        # This is important: naive datetimes (without timezone) cause
-        # subtle bugs when comparing across environments.
+        # Read the full file content into memory as bytes.
+        # await is required because this reads from the HTTP request stream.
+        content: bytes = await file.read()
+        # content is now a bytes object holding the raw image data.
+        # bytes is Python's type for raw binary data.
+        # b"\xff\xd8\xff" would be the start of a JPEG, for example.
 
-        session_settings = DefaultSettings()
-        # DefaultSettings() with no arguments uses all the Field defaults,
-        # which are populated from the config.py settings object.
-        # Example: scanning_mode=settings.default_scanning_mode → "balanced"
+        # Seek back to the beginning of the file after reading.
+        # FastAPI's UploadFile is backed by a SpooledTemporaryFile.
+        # After read(), the cursor is at the end of the file.
+        # Some future modules may need to read the file again.
+        # Seeking to 0 resets the cursor so it can be read again.
+        await file.seek(0)
 
-        session = SessionData(
-            session_id=session_id,
-            privo_frame=privo_frame,
-            source=privo_frame.source,
-            # Copy source to top level for convenient access.
-            # Without this, a query like "how many CAMERA sessions today?"
-            # would need to unpack every PrivoFrame to check .source.
-            # At the top level, it's a direct field lookup.
-            settings=session_settings,
-            status=SessionStatus.PENDING,
-            created_at=now,
-            updated_at=now,
-            # Both timestamps are identical at creation.
-            # updated_at will advance each time the status changes.
-            settings_loaded=True
+        # Extract the extension from the filename before building PrivoFrame
+        extension = self._extract_extension(file.filename)
+
+        # Build the normalised PrivoFrame from the upload data
+        frame = PrivoFrame(
+            content=content,
+            source=InputSource.GALLERY,
+            filename=file.filename,
+            extension=extension,
+            size_bytes=len(content)
+            # len(content) gives the exact byte count from what we read.
+            # This is more reliable than file.size, which comes from the
+            # HTTP Content-Length header and may be None if the client
+            # did not send that header.
         )
 
-        SessionManager._store[session_id] = session
-        # Store using the class name (_store), not self._store.
-        # Both work, but using the class name makes it explicit
-        # that we are writing to the shared class-level store,
-        # not an instance-level variable.
+        return self._validate_privo_frame(frame)
 
+    # ── PUBLIC ENTRY POINT: CAMERA / VIDEO FRAMES (FUTURE) ────────
+
+    def validate_frame(
+        self,
+        content: bytes,
+        source: InputSource,
+        frame_index: Optional[int] = None
+    ) -> ValidationResult:
+        """
+        Entry point for Phase 2 and 3: camera captures and video frames.
+
+        Accepts raw bytes and wraps them into a PrivoFrame before
+        delegating to the shared validation logic.
+
+        This method is synchronous (not async) because by the time
+        camera bytes arrive here, they are already in memory — there
+        is no stream to await.
+
+        PARAMETERS
+        ----------
+        content : bytes
+            Raw image bytes. For camera: JPEG-encoded frame from browser.
+            For video: decoded frame bytes from OpenCV or FFmpeg.
+
+        source : InputSource
+            Must be InputSource.CAMERA or InputSource.VIDEO.
+            Determines which validation checks apply.
+
+        frame_index : Optional[int]
+            For VIDEO source: the frame number in the stream.
+            None for CAMERA source.
+
+        RETURNS
+        -------
+        ValidationResult with privo_frame populated if valid=True.
+
+        FUTURE USAGE (Phase 2 camera endpoint):
+        ----------------------------------------
+        @router.post("/capture")
+        async def capture_endpoint(frame_data: bytes = Body(...)):
+            engine = TriggerEngine()
+            result = engine.validate_frame(frame_data, InputSource.CAMERA)
+            if not result.valid:
+                raise HTTPException(400, result.error_message)
+            session = session_manager.create_session(result.privo_frame)
+            ...
+        """
         logger.info(
-            f"Session Manager: session created | "
-            f"id={session_id} | "
-            f"source={privo_frame.source.value} | "
-            f"file='{privo_frame.filename}' | "
-            f"size={privo_frame.size_bytes} bytes | "
-            f"mode={session_settings.scanning_mode}"
+            f"Trigger Engine: validating {source.value} frame"
+            + (f" #{frame_index}" if frame_index is not None else "")
         )
 
-        return session
+        frame = PrivoFrame(
+            content=content,
+            source=source,
+            filename=None,
+            # Camera and video frames have no filename.
+            # The Metadata Extractor will look at GPS context instead.
+            extension=None,
+            # No extension for raw frame bytes.
+            frame_index=frame_index,
+            size_bytes=len(content)
+        )
 
-    def get_session(self, session_id: str) -> Optional[SessionData]:
+        return self._validate_privo_frame(frame)
+
+    # ── SHARED INTERNAL VALIDATION CORE ───────────────────────────
+
+    def _validate_privo_frame(self, frame: PrivoFrame) -> ValidationResult:
         """
-        Retrieves a session by its ID.
+        The shared validation core. Called by both public methods.
 
-        Used by all downstream pipeline engines to access session data.
+        Runs three ordered checks. Fails fast on the first failure.
+        Extension check is skipped for non-gallery sources (camera and
+        video frames have no extension to check).
 
         PARAMETERS
         ----------
-        session_id : str
-            The full session ID, e.g. "PRIVO-SESSION-A3F8B21C"
+        frame : PrivoFrame
+            The already-constructed normalised input container.
 
         RETURNS
         -------
-        SessionData  → if the session exists in memory
-        None         → if the session does not exist or was terminated
-
-        WHY RETURN None INSTEAD OF RAISING AN EXCEPTION?
-        -------------------------------------------------
-        The caller (an endpoint or engine) needs to decide what to do
-        when a session is not found. Returning None gives the caller
-        that choice. If we raised an exception here, every caller would
-        need a try/except block — more verbose and less flexible.
-
-        The endpoint will check:
-            session = manager.get_session(session_id)
-            if session is None:
-                raise HTTPException(404, "Session not found")
-
-        USAGE IN FUTURE ENDPOINTS
-        -------------------------
-        GET /api/v1/session/{session_id}/status
-            session = manager.get_session(session_id)
-            if session is None:
-                raise HTTPException(404, "Session not found or expired")
-            return {"status": session.status}
+        ValidationResult
+            valid=True  → privo_frame is populated, pipeline continues
+            valid=False → error_code and error_message describe the failure
         """
-        session = SessionManager._store.get(session_id)
-        # dict.get(key) returns the value if the key exists,
-        # or None if it doesn't — no KeyError raised.
-        # This is safer than SessionManager._store[session_id]
-        # which would raise KeyError for missing keys.
 
-        if session is None:
-            logger.warning(f"Session Manager: session not found — '{session_id}'")
-        else:
-            logger.debug(f"Session Manager: session retrieved — '{session_id}'")
+        # ── CHECK 1: Content Presence ──────────────────────────────
+        presence_result = self._check_content_presence(frame)
+        if not presence_result.valid:
+            return presence_result
 
-        return session
+        # ── CHECK 2: Extension (Gallery only) ─────────────────────
+        # Camera and video frames have no extension to validate.
+        # Applying this check to them would cause false rejections.
+        if frame.source == InputSource.GALLERY:
+            extension_result = self._check_extension(frame)
+            if not extension_result.valid:
+                return extension_result
 
-    def terminate_session(self, session_id: str) -> bool:
+        # ── CHECK 3: Size ──────────────────────────────────────────
+        size_result = self._check_size(frame)
+        if not size_result.valid:
+            return size_result
+
+        # ── ALL CHECKS PASSED ──────────────────────────────────────
+        logger.info(
+            f"Trigger Engine: validation passed | "
+            f"source={frame.source.value} | "
+            f"file='{frame.filename}' | "
+            f"ext='{frame.extension}' | "
+            f"size={frame.size_bytes} bytes"
+        )
+
+        return ValidationResult(valid=True, privo_frame=frame)
+
+    # ── PRIVATE VALIDATION CHECKS ─────────────────────────────────
+
+    def _check_content_presence(self, frame: PrivoFrame) -> ValidationResult:
         """
-        Marks a session as TERMINATED and removes it from memory.
+        CHECK 1: Content Presence
 
-        Called by the Session Termination Module (future) when:
-        - The user explicitly closes the session
-        - The session exceeds settings.session_expiry_minutes
-        - The server is shutting down and needs to clean up
+        Verifies the frame actually contains bytes.
+        Catches: empty uploads, failed camera captures, corrupted frames.
 
-        PARAMETERS
-        ----------
-        session_id : str
-            The full session ID to terminate.
-
-        RETURNS
-        -------
-        True  → session was found and terminated successfully
-        False → session was not found (already terminated or never existed)
-
-        WHY RETURN bool INSTEAD OF RAISING AN EXCEPTION?
-        -------------------------------------------------
-        Terminating a non-existent session is not necessarily an error.
-        It could mean the session already expired, or a duplicate
-        termination request was sent. Returning False lets the caller
-        decide whether this is a problem worth logging or alerting on.
-
-        WHAT HAPPENS ON TERMINATION
-        ----------------------------
-        In Week 1: session is simply deleted from _store.
-        Future Memory Engine: before deleting, check if analysis_history
-        is True in session.settings. If so, persist the session to
-        long-term storage (database or file) before removing from memory.
+        For gallery: catches the case where the HTTP body was empty.
+        For camera: catches the case where the browser sent no data.
+        For video: catches the case where frame extraction failed.
         """
-        session = SessionManager._store.get(session_id)
-
-        if session is None:
+        if not frame.content or len(frame.content) == 0:
             logger.warning(
-                f"Session Manager: terminate called for unknown session — '{session_id}'"
+                f"Trigger Engine: presence check failed — "
+                f"no content in {frame.source.value} frame"
             )
-            return False
+            return ValidationResult(
+                valid=False,
+                error_code="MISSING_CONTENT",
+                error_message="No image data was received. Please try again."
+            )
 
-        # Update status before removing from store.
-        # Future: Memory Engine checks this status before persisting.
-        session.status = SessionStatus.TERMINATED
-        session.updated_at = datetime.now(timezone.utc)
+        logger.debug(
+            f"Trigger Engine: presence check passed — "
+            f"{len(frame.content)} bytes received"
+        )
+        return ValidationResult(valid=True, privo_frame=frame)
 
-        del SessionManager._store[session_id]
-        # del: Python's keyword to delete a dictionary entry.
-        # The SessionData object is removed from the store.
-        # Python's garbage collector will free the memory once no
-        # other variables hold a reference to it.
-
-        logger.info(f"Session Manager: session terminated — '{session_id}'")
-        return True
-
-    def get_active_session_count(self) -> int:
+    def _check_extension(self, frame: PrivoFrame) -> ValidationResult:
         """
-        Returns the number of sessions currently in memory.
+        CHECK 2: Extension Validation (Gallery source only)
 
-        Used for health monitoring and development debugging.
+        Verifies the file extension is in Privo's allowed list.
 
-        Future: The Analytics Dashboard will call this to display
-        "Active Sessions" in the admin panel.
-        The Session Termination Module will call this to decide
-        whether to run an expiry sweep.
+        WHY ONLY FOR GALLERY?
+        ----------------------
+        Gallery images have filenames and therefore extensions.
+        Camera and video frames are raw bytes — they have no filename
+        and no extension to check. They enter the pipeline as bytes
+        directly without a file container around them.
 
-        USAGE IN HEALTH ENDPOINT (future)
-        ----------------------------------
-        GET /api/v1/health
-            manager = SessionManager()
-            return {
-                "status": "healthy",
-                "active_sessions": manager.get_active_session_count()
-            }
+        IMPORTANT LIMITATION (Week 1)
+        ------------------------------
+        This checks the extension string only, not the actual binary
+        signature (magic bytes) inside the file. A renamed .exe would
+        pass this check. The Security Hardening Module (future) will
+        add magic byte verification using the `python-magic` library.
+        For Week 1, extension checking is the appropriate first filter.
         """
-        count = len(SessionManager._store)
-        logger.debug(f"Session Manager: active session count — {count}")
-        return count
+        if not frame.extension:
+            logger.warning(
+                f"Trigger Engine: extension check failed — "
+                f"no extension found in '{frame.filename}'"
+            )
+            return ValidationResult(
+                valid=False,
+                error_code="MISSING_EXTENSION",
+                error_message="The file has no extension. Please upload a valid image file."
+            )
 
-    # ── PRIVATE METHODS ───────────────────────────────────────────
+        if frame.extension not in settings.allowed_extensions:
+            allowed = ", ".join(settings.allowed_extensions)
+            logger.warning(
+                f"Trigger Engine: extension check failed — "
+                f"'.{frame.extension}' not in allowed list"
+            )
+            return ValidationResult(
+                valid=False,
+                error_code="UNSUPPORTED_EXTENSION",
+                error_message=(
+                    f"'.{frame.extension}' is not a supported format. "
+                    f"Privo accepts: {allowed}."
+                )
+            )
 
-    def _generate_session_id(self) -> str:
+        logger.debug(
+            f"Trigger Engine: extension check passed — '.{frame.extension}'"
+        )
+        return ValidationResult(valid=True, privo_frame=frame)
+
+    def _check_size(self, frame: PrivoFrame) -> ValidationResult:
         """
-        Generates a unique, cryptographically secure session ID.
+        CHECK 3: Size Validation
 
-        FORMAT: "PRIVO-SESSION-XXXXXXXX"
-        Where XXXXXXXX is 8 uppercase hexadecimal characters.
+        Verifies the content does not exceed the maximum allowed size.
+
+        For gallery: size comes from len(file bytes read).
+        For camera: size comes from len(frame bytes received).
+        For video: size comes from len(frame bytes from decoder).
+
+        Unlike the previous version of this check, we always have
+        size_bytes here because we compute it from len(content)
+        during PrivoFrame construction — we no longer depend on
+        the HTTP Content-Length header, which could be None.
+        """
+        if frame.size_bytes is None:
+            # Defensive fallback — should not occur since we set
+            # size_bytes=len(content) in both public entry points.
+            logger.debug("Trigger Engine: size check skipped — size_bytes is None")
+            return ValidationResult(valid=True, privo_frame=frame)
+
+        if frame.size_bytes > settings.max_file_size_bytes:
+            size_mb = frame.size_bytes / (1024 * 1024)
+            limit_mb = settings.max_file_size_mb
+            logger.warning(
+                f"Trigger Engine: size check failed — "
+                f"{size_mb:.1f} MB exceeds {limit_mb} MB limit"
+            )
+            return ValidationResult(
+                valid=False,
+                error_code="FILE_TOO_LARGE",
+                error_message=(
+                    f"File is {size_mb:.1f} MB. "
+                    f"Maximum allowed size is {limit_mb} MB."
+                )
+            )
+
+        size_mb = frame.size_bytes / (1024 * 1024)
+        logger.debug(
+            f"Trigger Engine: size check passed — "
+            f"{frame.size_bytes} bytes ({size_mb:.2f} MB)"
+        )
+        return ValidationResult(valid=True, privo_frame=frame)
+
+    # ── PRIVATE HELPERS ───────────────────────────────────────────
+
+    def _extract_extension(self, filename: Optional[str]) -> Optional[str]:
+        """
+        Extracts and normalises the file extension from a filename.
+
+        RETURNS
+        -------
+        str  → lowercased extension without leading dot: "jpg", "png"
+        None → if filename is None, empty, or has no extension
 
         EXAMPLES
         --------
-        PRIVO-SESSION-A3F8B21C
-        PRIVO-SESSION-0D4E9F7A
-        PRIVO-SESSION-C2187B3D
+        "photo.JPG"   → "jpg"
+        "image.jpeg"  → "jpeg"
+        "file"        → None
+        None          → None
+        ".hidden"     → None  (no actual extension)
 
-        WHY secrets.token_hex(4)?
-        --------------------------
-        secrets.token_hex(n) generates n random bytes and returns them
-        as a hex string of length 2n.
-        token_hex(4) → 4 bytes → 8 hex characters.
-
-        4 bytes = 32 bits of randomness = 4,294,967,296 possible values.
-        The chance of a collision (two sessions getting the same ID)
-        is negligible for Privo's scale.
-
-        WHY .upper()?
-        -------------
-        token_hex returns lowercase hex: "a3f8b21c"
-        We uppercase it: "A3F8B21C"
-        This matches the format shown in the project specification
-        and is more readable in log files.
-
-        WHY THE COLLISION CHECK LOOP?
-        --------------------------------
-        In theory, two calls to token_hex(4) could produce the same value.
-        With 4 billion possibilities, this is extremely unlikely, but
-        "extremely unlikely" is not "impossible". The loop regenerates
-        the token if — by some cosmic coincidence — it already exists.
-        This guarantees uniqueness without using a database sequence.
+        WHY os.path.splitext?
+        ----------------------
+        os.path.splitext is the standard, cross-platform way to split a
+        filename into base and extension. It handles edge cases like
+        dotfiles (.hidden) and multiple dots (archive.tar.gz) correctly.
         """
-        while True:
-            # Generate a candidate ID
-            token = secrets.token_hex(4).upper()
-            session_id = f"{settings.session_prefix}-{token}"
-            # settings.session_prefix = "PRIVO-SESSION" (from config.py)
-            # token = "A3F8B21C" (example)
-            # result = "PRIVO-SESSION-A3F8B21C"
+        if not filename:
+            return None
 
-            if session_id not in SessionManager._store:
-                # This ID doesn't exist yet — safe to use.
-                logger.debug(f"Session Manager: generated session ID — '{session_id}'")
-                return session_id
-            # If it already exists (extraordinarily unlikely),
-            # the loop continues and generates a new candidate.
-            logger.warning(
-                f"Session Manager: session ID collision detected — "
-                f"'{session_id}' already exists. Regenerating."
-            )
+        _, ext = os.path.splitext(filename)
+        # _ : the base name ("photo") — we don't need it here
+        # ext: the extension (".jpg") — this is what we want
+
+        if not ext:
+            return None
+
+        return ext.lstrip(".").lower()
+        # lstrip("."): removes the leading dot → "jpg"
+        # lower():     normalises case       → "JPG" becomes "jpg"

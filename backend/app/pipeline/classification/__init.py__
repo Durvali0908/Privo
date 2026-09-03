@@ -1,0 +1,9 @@
+"""
+app/pipeline/classification/__init__.py
+
+Classification stage — converts DetectedRegions into named PrivacySignals.
+
+Modules:
+    signal_ontology.py        → SignalType enum + classification rules
+    signal_classification.py  → SignalClassificationEngine
+"""

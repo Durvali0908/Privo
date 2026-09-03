@@ -163,7 +163,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 # get_logger: Logging factory from logging.py.
 
-from app.pipeline.intake.trigger import PrivoFrame, InputSource
+from app.engine.trigger import PrivoFrame, InputSource
 # PrivoFrame: The normalised input container from the Trigger Engine.
 #   This is what the Session Manager receives and stores.
 # InputSource: The enum of valid input sources (GALLERY, CAMERA, VIDEO).

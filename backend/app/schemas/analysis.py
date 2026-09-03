@@ -342,6 +342,15 @@ class AnalysisResponse(BaseModel):
         )
     )
 
+    # ── WEEK 4 ────────────────────────────────────────────────────
+    classification: Optional["ClassificationSummary"] = Field(
+        default=None,
+        description=(
+            "Signal classification results. "
+            "Null when classification has not yet run."
+        )
+    )
+
 # ─────────────────────────────────────────────────────────────────
 # WEEK 3 — DETECTION SCHEMAS
 # ─────────────────────────────────────────────────────────────────
@@ -379,5 +388,37 @@ class DetectionSummary(BaseModel):
     error: Optional[str] = None
 
 
-# Rebuild AnalysisResponse to pick up the forward reference
+
+# ─────────────────────────────────────────────────────────────────
+# WEEK 4 — CLASSIFICATION SCHEMAS
+# ─────────────────────────────────────────────────────────────────
+
+class PrivacySignalSchema(BaseModel):
+    """
+    Public API representation of one classified privacy signal.
+    Mirrors PrivacySignal from signal_classification.py.
+    """
+    signal_type:  str   # e.g. "face_visible", "indian_id_aadhaar"
+    category:     str   # e.g. "identity_exposure"
+    confidence:   float
+    source_type:  str   # "face" | "qr_code" | "text"
+    content:      Optional[str] = None
+    explanation:  str
+
+
+class ClassificationSummary(BaseModel):
+    """
+    Envelope for signal classification results.
+    Mirrors ClassificationResult from signal_classification.py.
+
+    success=False means the engine could not run.
+    total=0 with success=True means no signals classified — valid result.
+    """
+    success:  bool
+    total:    int = Field(default=0)
+    signals:  List[PrivacySignalSchema] = Field(default_factory=list)
+    error:    Optional[str] = None
+
+
+# Rebuild AnalysisResponse to pick up all forward references
 AnalysisResponse.model_rebuild()
