@@ -27,7 +27,7 @@ export default function App() {
         >
           <Text style={styles.tabIcon}>🖼️</Text>
           <Text style={[styles.tabLabel, activeTab === 'gallery' && styles.tabLabelActive]}>
-            Gallery
+            Import
           </Text>
         </TouchableOpacity>
 

@@ -110,10 +110,13 @@ from app.schemas.analysis import (
     MetadataSummary,
     DetectedRegionSchema,
     DetectionSummary,
+    PrivacySignalSchema,
+    ClassificationSummary,
 )
 
 from app.pipeline.detection.detection_engine import DetectionEngine
 from app.pipeline.detection.roi_manager import RegionType
+from app.pipeline.classification.signal_classification import SignalClassificationEngine
 
 from app.core.logging import get_logger
 
@@ -334,10 +337,21 @@ async def analyze(
         f"success={detection_result.success} | "
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
-        f"text={detection_result.text_count}"
+        f"text={detection_result.text_count} | "
+        f"signals={classification_result.total}"
     )
 
-    # ── STEP 7: Build the API Response ────────────────────────────
+    # ── STEP 7: Signal Classification ────────────────────────────
+    classification_engine = SignalClassificationEngine()
+    classification_result = classification_engine.classify(detection_result.regions)
+
+    logger.info(
+        f"Analyze endpoint: classification done | "
+        f"session={session.session_id} | "
+        f"signals={classification_result.total}"
+    )
+
+    # ── STEP 8: Build the API Response ────────────────────────────
     # Construct MetadataSummary from extraction results.
     metadata_summary = MetadataSummary(
         extraction_success=raw_metadata.extraction_success,
@@ -384,6 +398,23 @@ async def analyze(
         error=detection_result.error,
     )
 
+    classification_summary = ClassificationSummary(
+        success=classification_result.success,
+        total=classification_result.total,
+        signals=[
+            PrivacySignalSchema(
+                signal_type=s.signal_type.value,
+                category=s.category.value,
+                confidence=s.confidence,
+                source_type=s.source_type,
+                content=s.content,
+                explanation=s.explanation,
+            )
+            for s in classification_result.signals
+        ],
+        error=classification_result.error,
+    )
+
     response = AnalysisResponse(
         success=True,
         session_id=session.session_id,
@@ -402,6 +433,7 @@ async def analyze(
         ),
         metadata=metadata_summary,
         detection=detection_summary,
+        classification=classification_summary,
     )
 
     logger.info(
@@ -412,7 +444,8 @@ async def analyze(
         f"extraction_success={raw_metadata.extraction_success} | "
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
-        f"text={detection_result.text_count}"
+        f"text={detection_result.text_count} | "
+        f"signals={classification_result.total}"
     )
 
     return response
