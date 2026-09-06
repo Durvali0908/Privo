@@ -338,7 +338,7 @@ async def analyze(
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
         f"text={detection_result.text_count} | "
-        f"signals={classification_result.total}"
+        f"signals=0"
     )
 
     # ── STEP 7: Signal Classification ────────────────────────────

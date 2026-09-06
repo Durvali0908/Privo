@@ -163,8 +163,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 # get_logger: Logging factory from logging.py.
 
-from app.engine.trigger import PrivoFrame, InputSource
-# PrivoFrame: The normalised input container from the Trigger Engine.
+from app.pipeline.intake.trigger import PrivoFrame, InputSource# PrivoFrame: The normalised input container from the Trigger Engine.
 #   This is what the Session Manager receives and stores.
 # InputSource: The enum of valid input sources (GALLERY, CAMERA, VIDEO).
 #   We store this on the session so analytics can report by source type.
@@ -393,6 +392,11 @@ class SessionData(BaseModel):
         description="Confirms default settings were loaded successfully"
     )
 
+    metadata_findings: list[dict] = Field(
+        default_factory=list,
+        description="Metadata privacy findings produced by the Metadata Vault"
+    )
+
 
 # ─────────────────────────────────────────────────────────────────
 # SESSION MANAGER
@@ -573,6 +577,48 @@ class SessionManager:
             logger.debug(f"Session Manager: session retrieved — '{session_id}'")
 
         return session
+
+    def update_metadata_findings(
+        self,
+        session_id: str,
+        findings: list[dict]
+    ) -> bool:
+        """
+        Stores metadata privacy findings on an existing session.
+
+        Parameters
+        ----------
+        session_id : str
+            The session whose metadata findings should be updated.
+
+        findings : list[dict]
+            Metadata findings produced by MetadataVault.classify().
+
+        Returns
+        -------
+        bool
+            True if the session was found and updated.
+            False if the session does not exist.
+        """
+        session = SessionManager._store.get(session_id)
+
+        if session is None:
+            logger.warning(
+                f"Session Manager: cannot update metadata findings — "
+                f"session not found — '{session_id}'"
+            )
+            return False
+
+        session.metadata_findings = findings
+        session.updated_at = datetime.now(timezone.utc)
+
+        logger.info(
+            f"Session Manager: metadata findings updated | "
+            f"id={session_id} | "
+            f"findings={len(findings)}"
+        )
+
+        return True
 
     def terminate_session(self, session_id: str) -> bool:
         """
