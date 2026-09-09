@@ -149,44 +149,53 @@ class DetectionEngine:
         img_h: int,
     ) -> List[DetectedRegion]:
         """
-        MediaPipe Face Mesh detection.
-        Returns one DetectedRegion per detected face.
-        Confidence is always 1.0 — MediaPipe does not expose
-        a per-detection score from FaceMesh results.
+        MediaPipe FaceLandmarker detection (Tasks API — mediapipe 1.0.1+).
+
+        face_mesh is a FaceLandmarker instance created in main.py lifespan.
+        FaceLandmarkerResult.face_landmarks is:
+            List[List[NormalizedLandmark]]
+        Each inner list is one face. NormalizedLandmark has .x and .y
+        in normalised image coordinates (0.0–1.0).
         """
         regions: List[DetectedRegion] = []
 
         try:
-            # MediaPipe expects RGB
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(image_rgb)
+            import mediapipe as mp
 
-            if not results.multi_face_landmarks:
+            # Tasks API requires RGB input wrapped in mp.Image
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            mp_image  = mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=image_rgb
+            )
+
+            results = face_mesh.detect(mp_image)
+            # results: FaceLandmarkerResult
+            # results.face_landmarks: List[List[NormalizedLandmark]]
+
+            if not results.face_landmarks:
+                logger.debug("Face detector: no faces found")
                 return regions
 
-            for face_landmarks in results.multi_face_landmarks:
-                # Extract bounding box from normalised landmark coordinates
-                xs = [lm.x for lm in face_landmarks.landmark]
-                ys = [lm.y for lm in face_landmarks.landmark]
+            for face_landmark_list in results.face_landmarks:
+                # face_landmark_list: List[NormalizedLandmark]
+                xs = [lm.x for lm in face_landmark_list]
+                ys = [lm.y for lm in face_landmark_list]
 
-                x_min = int(min(xs) * img_w)
-                y_min = int(min(ys) * img_h)
-                x_max = int(max(xs) * img_w)
-                y_max = int(max(ys) * img_h)
-
-                # Clamp to image bounds
-                x_min = max(0, x_min)
-                y_min = max(0, y_min)
-                x_max = min(img_w, x_max)
-                y_max = min(img_h, y_max)
+                x_min = max(0,     int(min(xs) * img_w))
+                y_min = max(0,     int(min(ys) * img_h))
+                x_max = min(img_w, int(max(xs) * img_w))
+                y_max = min(img_h, int(max(ys) * img_h))
 
                 regions.append(DetectedRegion(
                     x=x_min,
                     y=y_min,
-                    width=x_max - x_min,
+                    width=x_max  - x_min,
                     height=y_max - y_min,
                     region_type=RegionType.FACE,
                     confidence=1.0,
+                    # FaceLandmarker does not expose a per-detection
+                    # confidence score in IMAGE running mode.
                 ))
 
             logger.debug(f"Face detector: {len(regions)} face(s) found")

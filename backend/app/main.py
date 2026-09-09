@@ -17,27 +17,39 @@ async def lifespan(app: FastAPI):
     logger.info(f"  {settings.app_name} v{settings.app_version} starting")
     logger.info("=" * 60)
 
-    # Load MediaPipe FaceMesh once — shared across all requests via app.state
+    app.state.face_mesh = None
     try:
         import mediapipe as mp
-        app.state.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True,
-            # static_image_mode=True: each call processes an independent image.
-            # False is for video streams where the same face persists frame to frame.
-            max_num_faces=10,
-            refine_landmarks=False,
-            # refine_landmarks=False: skips iris landmarks (468→478).
-            # We only need the face bounding box, not iris precision.
-            # Saves ~20ms per image on the i3.
-            min_detection_confidence=0.5,
-        )
-        logger.info("MediaPipe FaceMesh loaded")
-    except ImportError:
-        app.state.face_mesh = None
-        logger.warning("mediapipe not installed — face detection disabled")
+        from mediapipe.tasks.python import vision
+        from mediapipe.tasks.python import BaseOptions
+        import os
+
+        model_path = settings.face_landmarker_model_path
+
+        if not os.path.exists(model_path):
+            logger.warning(
+                f"FaceLandmarker model not found at '{model_path}'. "
+                f"Download from: https://storage.googleapis.com/mediapipe-models/"
+                f"face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            )
+        else:
+            options = vision.FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=model_path),
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=10,
+                min_face_detection_confidence=0.5,
+                min_face_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+            )
+            app.state.face_mesh = vision.FaceLandmarker.create_from_options(options)
+            logger.info("MediaPipe FaceLandmarker loaded (Tasks API)")
+
+    except ImportError as exc:
+        logger.warning(f"mediapipe not installed — face detection disabled: {exc}")
     except Exception as exc:
-        app.state.face_mesh = None
-        logger.error(f"FaceMesh load failed: {exc}")
+        logger.error(f"FaceLandmarker load failed: {exc}", exc_info=True)
 
     logger.info(f"CORS origins : {settings.allowed_origins}")
     logger.info(f"Max file size: {settings.max_file_size_mb} MB")
@@ -50,8 +62,7 @@ async def lifespan(app: FastAPI):
     # ── SHUTDOWN ─────────────────────────────────────────────────
     if hasattr(app.state, "face_mesh") and app.state.face_mesh is not None:
         app.state.face_mesh.close()
-        logger.info("MediaPipe FaceMesh released")
-
+        logger.info("MediaPipe FaceLandmarker released")
     logger.info("Privo backend shutting down.")
 
 

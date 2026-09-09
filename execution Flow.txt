@@ -1,0 +1,17 @@
+Terminal 1 — Backend
+cd D:\PrivoCEP\backend
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+Terminal 2 — ADB
+adb devices
+adb reverse tcp:8000 tcp:8000
+adb reverse tcp:8081 tcp:8081
+
+Terminal 3 — Frontend
+cd D:\PrivoCEP\frontend
+npx expo start
+
+Phone
+Open Expo Go → open the Privo project.
+

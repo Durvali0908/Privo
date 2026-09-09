@@ -190,6 +190,15 @@ class Settings(BaseSettings):
     # The prefix makes them easy to identify in logs.
 
     session_expiry_minutes: int = Field(default=60, description="Session lifetime in minutes")
+    face_landmarker_model_path: str = Field(
+        default="app/models/face_landmarker.task",
+        description=(
+            "Path to MediaPipe FaceLandmarker .task model file. "
+            "Download from: https://storage.googleapis.com/mediapipe-models/"
+            "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        )
+    )
+
     # Sessions are stored in memory. After 60 minutes, a session expires.
     # Future: Memory Engine will use this to clean up old sessions.
 
