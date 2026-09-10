@@ -207,33 +207,90 @@ class DetectionEngine:
 
     def _detect_qr(self, image_bgr: np.ndarray) -> List[DetectedRegion]:
         """
-        OpenCV QRCodeDetector.
-        Returns one DetectedRegion per detected QR code or barcode.
-        Content field contains the decoded string.
+        OpenCV QRCodeDetector — multi-QR detection.
+
+        Uses detectAndDecodeMulti() to find ALL QR codes in one call.
+        Falls back to detectAndDecode() if multi fails (OpenCV < 4.5).
+
+        Also attempts detection on a preprocessed grayscale image
+        to improve detection of low-contrast QR codes on screens.
         """
         regions: List[DetectedRegion] = []
 
         try:
             detector = cv2.QRCodeDetector()
-            data, points, _ = detector.detectAndDecode(image_bgr)
 
-            if points is not None and data:
-                pts = points[0].astype(int)
-                x_min = int(pts[:, 0].min())
-                y_min = int(pts[:, 1].min())
-                x_max = int(pts[:, 0].max())
-                y_max = int(pts[:, 1].max())
+            # Try colour image first, then grayscale for screen QR codes
+            candidates = [image_bgr]
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            # Adaptive threshold improves low-contrast screen QR codes
+            thresh = cv2.adaptiveThreshold(
+                gray, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 11, 2
+            )
+            candidates.append(cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR))
 
-                regions.append(DetectedRegion(
-                    x=x_min,
-                    y=y_min,
-                    width=x_max - x_min,
-                    height=y_max - y_min,
-                    region_type=RegionType.QR_CODE,
-                    confidence=1.0,
-                    content=data,
-                ))
-                logger.debug(f"QR detector: found QR — content='{data[:40]}'")
+            seen_boxes: set = set()
+
+            for img_candidate in candidates:
+                # Try multi-QR first (OpenCV 4.5+)
+                try:
+                    retval, decoded_list, points_list, _ =                         detector.detectAndDecodeMulti(img_candidate)
+
+                    if retval and points_list is not None:
+                        for i, pts in enumerate(points_list):
+                            data = decoded_list[i] if i < len(decoded_list) else ""
+                            pts_int = pts.astype(int)
+                            x_min = int(pts_int[:, 0].min())
+                            y_min = int(pts_int[:, 1].min())
+                            x_max = int(pts_int[:, 0].max())
+                            y_max = int(pts_int[:, 1].max())
+
+                            # Deduplicate by box position
+                            box_key = (x_min // 10, y_min // 10)
+                            if box_key in seen_boxes:
+                                continue
+                            seen_boxes.add(box_key)
+
+                            regions.append(DetectedRegion(
+                                x=x_min,
+                                y=y_min,
+                                width=x_max - x_min,
+                                height=y_max - y_min,
+                                region_type=RegionType.QR_CODE,
+                                confidence=1.0,
+                                content=data if data else None,
+                            ))
+                            logger.debug(
+                                f"QR detector: found QR — "
+                                f"content='{str(data)[:40]}'"
+                            )
+
+                except (cv2.error, AttributeError):
+                    # Fallback: single QR detection (older OpenCV)
+                    data, points, _ = detector.detectAndDecode(img_candidate)
+                    if points is not None and data:
+                        pts = points[0].astype(int)
+                        x_min = int(pts[:, 0].min())
+                        y_min = int(pts[:, 1].min())
+                        x_max = int(pts[:, 0].max())
+                        y_max = int(pts[:, 1].max())
+
+                        box_key = (x_min // 10, y_min // 10)
+                        if box_key not in seen_boxes:
+                            seen_boxes.add(box_key)
+                            regions.append(DetectedRegion(
+                                x=x_min,
+                                y=y_min,
+                                width=x_max - x_min,
+                                height=y_max - y_min,
+                                region_type=RegionType.QR_CODE,
+                                confidence=1.0,
+                                content=data,
+                            ))
+
+            logger.debug(f"QR detector: {len(regions)} QR code(s) found")
 
         except Exception as exc:
             logger.error(f"QR detector error: {exc}", exc_info=True)

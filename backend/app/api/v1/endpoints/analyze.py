@@ -112,11 +112,16 @@ from app.schemas.analysis import (
     DetectionSummary,
     PrivacySignalSchema,
     ClassificationSummary,
+    CategoryRiskSchema,
+    RiskSummary,
 )
 
 from app.pipeline.detection.detection_engine import DetectionEngine
 from app.pipeline.detection.roi_manager import RegionType
 from app.pipeline.classification.signal_classification import SignalClassificationEngine
+from app.pipeline.analysis.signal_correlation import SignalCorrelationEngine
+from app.pipeline.analysis.exposure_analysis import ExposureAnalysisEngine
+from app.pipeline.analysis.risk_scoring import RiskScoringEngine
 
 from app.core.logging import get_logger
 
@@ -338,7 +343,8 @@ async def analyze(
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
         f"text={detection_result.text_count} | "
-        f"signals=0"
+        f"signals={classification_result.total} | "
+        f"risk={risk_result.overall_level} ({risk_result.overall_score})"
     )
 
     # ── STEP 7: Signal Classification ────────────────────────────
@@ -348,10 +354,45 @@ async def analyze(
     logger.info(
         f"Analyze endpoint: classification done | "
         f"session={session.session_id} | "
-        f"signals={classification_result.total}"
+        f"signals={classification_result.total} | "
+        f"risk={risk_result.overall_level} ({risk_result.overall_score})"
     )
 
-    # ── STEP 8: Build the API Response ────────────────────────────
+    # ── STEP 8: Signal Correlation ───────────────────────────────
+    correlation_engine = SignalCorrelationEngine()
+    correlation_result = correlation_engine.correlate(
+        classification=classification_result,
+        metadata_findings=findings,
+    )
+
+    logger.info(
+        f"Analyze endpoint: correlation done | "
+        f"correlations={len(correlation_result.correlations)}"
+    )
+
+    # ── STEP 9: Exposure Analysis ──────────────────────────────
+    exposure_engine = ExposureAnalysisEngine()
+    exposure_result = exposure_engine.analyse(
+        classification=classification_result,
+        metadata_findings=findings,
+        correlations=correlation_result,
+    )
+
+    logger.info(
+        f"Analyze endpoint: exposure done | "
+        f"categories={len(exposure_result.exposures)}"
+    )
+
+    # ── STEP 10: Risk Scoring ──────────────────────────────────
+    risk_engine = RiskScoringEngine()
+    risk_result  = risk_engine.score(exposure_result)
+
+    logger.info(
+        f"Analyze endpoint: risk scoring done | "
+        f"overall={risk_result.overall_score} ({risk_result.overall_level})"
+    )
+
+    # ── STEP 11: Build the API Response ───────────────────────────
     # Construct MetadataSummary from extraction results.
     metadata_summary = MetadataSummary(
         extraction_success=raw_metadata.extraction_success,
@@ -415,6 +456,23 @@ async def analyze(
         error=classification_result.error,
     )
 
+    risk_summary = RiskSummary(
+        success=risk_result.success,
+        overall_score=risk_result.overall_score,
+        overall_level=risk_result.overall_level,
+        dominant_category=risk_result.dominant_category,
+        category_risks=[
+            CategoryRiskSchema(
+                category=r.category,
+                score=r.score,
+                level=r.level,
+                is_correlated=r.is_correlated,
+            )
+            for r in risk_result.category_risks
+        ],
+        error=risk_result.error,
+    )
+
     response = AnalysisResponse(
         success=True,
         session_id=session.session_id,
@@ -434,6 +492,7 @@ async def analyze(
         metadata=metadata_summary,
         detection=detection_summary,
         classification=classification_summary,
+        risk=risk_summary,
     )
 
     logger.info(
@@ -445,7 +504,8 @@ async def analyze(
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
         f"text={detection_result.text_count} | "
-        f"signals={classification_result.total}"
+        f"signals={classification_result.total} | "
+        f"risk={risk_result.overall_level} ({risk_result.overall_score})"
     )
 
     return response

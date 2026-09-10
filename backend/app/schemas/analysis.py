@@ -351,6 +351,15 @@ class AnalysisResponse(BaseModel):
         )
     )
 
+    # ── WEEK 5 ────────────────────────────────────────────────────
+    risk: Optional["RiskSummary"] = Field(
+        default=None,
+        description=(
+            "Risk scoring results. "
+            "Null when risk scoring has not yet run."
+        )
+    )
+
 # ─────────────────────────────────────────────────────────────────
 # WEEK 3 — DETECTION SCHEMAS
 # ─────────────────────────────────────────────────────────────────
@@ -418,6 +427,35 @@ class ClassificationSummary(BaseModel):
     total:    int = Field(default=0)
     signals:  List[PrivacySignalSchema] = Field(default_factory=list)
     error:    Optional[str] = None
+
+
+
+# ─────────────────────────────────────────────────────────────────
+# WEEK 5 — RISK SCHEMAS
+# ─────────────────────────────────────────────────────────────────
+
+class CategoryRiskSchema(BaseModel):
+    """Risk score for one exposure category. Mirrors CategoryRisk."""
+    category:      str
+    score:         float
+    level:         str    # "low" | "medium" | "high" | "critical"
+    is_correlated: bool = False
+
+
+class RiskSummary(BaseModel):
+    """
+    Overall risk assessment for the image.
+    Mirrors RiskResult from risk_scoring.py.
+
+    overall_level: "low" | "medium" | "high" | "critical"
+    dominant_category: the highest-scoring exposure category
+    """
+    success:           bool
+    overall_score:     float = Field(default=0.0)
+    overall_level:     str   = Field(default="low")
+    category_risks:    List[CategoryRiskSchema] = Field(default_factory=list)
+    dominant_category: Optional[str] = None
+    error:             Optional[str] = None
 
 
 # Rebuild AnalysisResponse to pick up all forward references
