@@ -88,6 +88,7 @@ import type {
     MetadataFinding,
     MetadataSummary,
     DetectionSummary,
+    RiskSummary,
 } from "../../types/analysis";
 
 
@@ -395,6 +396,94 @@ function SessionDetails({
 }
 
 
+
+// ─────────────────────────────────────────────────────────────────
+// RISK SECTION (Week 5)
+// ─────────────────────────────────────────────────────────────────
+
+const RISK_COLOURS: Record<string, { bg: string; text: string; border: string }> = {
+    low: { bg: "#0F2010", text: "#4ADE80", border: "#166534" },
+    medium: { bg: "#2D1B00", text: "#FFB347", border: "#7A4500" },
+    high: { bg: "#3B0000", text: "#FF6B6B", border: "#7F0000" },
+    critical: { bg: "#1A0000", text: "#FF2020", border: "#5C0000" },
+};
+
+function RiskSection({ risk }: { risk: RiskSummary }) {
+    if (!risk.success) {
+        return (
+            <View style={rStyles.section}>
+                <Text style={rStyles.title}>Risk Assessment</Text>
+                <View style={rStyles.warnBox}>
+                    <Text style={rStyles.warnText}>Risk scoring could not complete.</Text>
+                </View>
+            </View>
+        );
+    }
+
+    const c = RISK_COLOURS[risk.overall_level] ?? RISK_COLOURS.low;
+
+    return (
+        <View style={rStyles.section}>
+            <View style={rStyles.headerRow}>
+                <Text style={rStyles.title}>Risk Assessment</Text>
+                {risk.dominant_category && (
+                    <Text style={rStyles.dominant}>
+                        ⚑ {getCategoryLabel(risk.dominant_category)}
+                    </Text>
+                )}
+            </View>
+
+            {/* Overall score indicator */}
+            <View style={[rStyles.indicator, { backgroundColor: c.bg, borderColor: c.border }]}>
+                <Text style={[rStyles.score, { color: c.text }]}>
+                    {risk.overall_score.toFixed(1)}
+                </Text>
+                <Text style={[rStyles.level, { color: c.text }]}>
+                    {risk.overall_level.toUpperCase()} RISK
+                </Text>
+            </View>
+
+            {/* Category breakdown — top 5 */}
+            {risk.category_risks.slice(0, 5).map((r, i) => {
+                const rc = RISK_COLOURS[r.level] ?? RISK_COLOURS.low;
+                return (
+                    <View key={`${r.category}-${i}`} style={rStyles.catRow}>
+                        <Text style={rStyles.catName} numberOfLines={1}>
+                            {getCategoryLabel(r.category)}{r.is_correlated ? " ⚡" : ""}
+                        </Text>
+                        <View style={rStyles.bar}>
+                            <View style={[
+                                rStyles.barFill,
+                                { width: `${(r.score / 10) * 100}%` as any, backgroundColor: rc.text }
+                            ]} />
+                        </View>
+                        <Text style={[rStyles.catScore, { color: rc.text }]}>
+                            {r.score.toFixed(1)}
+                        </Text>
+                    </View>
+                );
+            })}
+        </View>
+    );
+}
+
+const rStyles = StyleSheet.create({
+    section: { gap: 10 },
+    headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+    title: { fontSize: 15, fontWeight: "600", color: "#F1F5F9" },
+    dominant: { fontSize: 12, color: "#94A3B8" },
+    indicator: { borderRadius: 12, borderWidth: 1, paddingVertical: 16, alignItems: "center" },
+    score: { fontSize: 36, fontWeight: "800" },
+    level: { fontSize: 13, fontWeight: "700", letterSpacing: 1, marginTop: 2 },
+    warnBox: { backgroundColor: "#1C1000", borderRadius: 10, padding: 14 },
+    warnText: { fontSize: 13, color: "#FCD34D" },
+    catRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+    catName: { flex: 1, fontSize: 12, color: "#94A3B8" },
+    bar: { flex: 2, height: 4, backgroundColor: "#1E293B", borderRadius: 2, overflow: "hidden" },
+    barFill: { height: "100%", borderRadius: 2 },
+    catScore: { fontSize: 12, fontWeight: "600", minWidth: 28, textAlign: "right" },
+});
+
 // ─────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────
@@ -566,6 +655,11 @@ export function UploadZone() {
                         {/* Metadata findings */}
                         {result.metadata && (
                             <MetadataSection metadata={result.metadata} />
+                        )}
+
+                        {/* Risk assessment — shown first, most important */}
+                        {result.risk && (
+                            <RiskSection risk={result.risk} />
                         )}
 
                         {/* Detection results */}

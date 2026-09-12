@@ -343,8 +343,8 @@ async def analyze(
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
         f"text={detection_result.text_count} | "
-        f"signals={classification_result.total} | "
-        f"risk={risk_result.overall_level} ({risk_result.overall_score})"
+       #f"signals={classification_result.total} | "
+        #f"risk={risk_result.overall_level} ({risk_result.overall_score})"
     )
 
     # ── STEP 7: Signal Classification ────────────────────────────
@@ -354,8 +354,7 @@ async def analyze(
     logger.info(
         f"Analyze endpoint: classification done | "
         f"session={session.session_id} | "
-        f"signals={classification_result.total} | "
-        f"risk={risk_result.overall_level} ({risk_result.overall_score})"
+        f"signals={classification_result.total}"
     )
 
     # ── STEP 8: Signal Correlation ───────────────────────────────

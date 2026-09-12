@@ -318,6 +318,76 @@ export interface DetectionSummary {
     error: string | null;
 }
 
+
+
+// ─────────────────────────────────────────────────────────────────
+// CLASSIFICATION TYPES (Week 4)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * One classified privacy signal.
+ * Mirrors PrivacySignalSchema from schemas/analysis.py.
+ */
+export interface PrivacySignal {
+    signal_type: string;         // e.g. "face_visible", "indian_id_aadhaar"
+    category: ExposureCategory;
+    confidence: number;
+    source_type: string;         // "face" | "qr_code" | "text"
+    content: string | null;
+    explanation: string;
+}
+
+/**
+ * Signal classification results envelope.
+ * Mirrors ClassificationSummary from schemas/analysis.py.
+ */
+export interface ClassificationSummary {
+    success: boolean;
+    total: number;
+    signals: PrivacySignal[];
+    error: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RISK TYPES (Week 5)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Risk level string — mirrors RISK_THRESHOLDS in risk_scoring.py.
+ * low: 0–2.9 | medium: 3–5.9 | high: 6–7.9 | critical: 8–10
+ */
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+/**
+ * Risk score for one exposure category.
+ * Mirrors CategoryRiskSchema from schemas/analysis.py.
+ */
+export interface CategoryRisk {
+    category: ExposureCategory;
+    score: number;          // 0.0 – 10.0
+    level: RiskLevel;
+    is_correlated: boolean;
+}
+
+/**
+ * Overall risk assessment for the image.
+ * Mirrors RiskSummary from schemas/analysis.py.
+ *
+ * overall_level drives the top-level risk indicator in the UI:
+ *   low      → green
+ *   medium   → amber
+ *   high     → red
+ *   critical → deep red + strong warning
+ */
+export interface RiskSummary {
+    success: boolean;
+    overall_score: number;        // 0.0 – 10.0
+    overall_level: RiskLevel;
+    category_risks: CategoryRisk[];
+    dominant_category: ExposureCategory | null;
+    error: string | null;
+}
+
 export interface AnalysisResponse {
     success: true;
     session_id: string;
@@ -337,13 +407,16 @@ export interface AnalysisResponse {
     // Week 3 — detection engine results
     detection: DetectionSummary | null;
 
-    // Week 5+ — risk scoring results
-    // risk?: RiskSummary
+    // Week 4 — signal classification
+    classification: ClassificationSummary | null;
 
-    // Week 6+ — heatmap data
+    // Week 5 — risk scoring
+    risk: RiskSummary | null;
+
+    // Week 6+ — heatmap data (future)
     // heatmap?: HeatmapData
 
-    // Week 7+ — protection results
+    // Week 7+ — protection results (future)
     // protection?: ProtectionSummary
 }
 
