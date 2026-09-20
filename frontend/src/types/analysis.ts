@@ -388,6 +388,42 @@ export interface RiskSummary {
     error: string | null;
 }
 
+
+// ─────────────────────────────────────────────────────────────────
+// HEATMAP TYPES (Week 6)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * One overlay cell in the privacy heatmap.
+ * Mirrors HeatmapCellSchema from schemas/analysis.py.
+ *
+ * x, y, width, height are in source image pixels.
+ * The frontend scales these to screen coordinates using
+ * image_width / image_height from HeatmapData.
+ */
+export interface HeatmapCell {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    intensity: number;      // 0.0–1.0 — drives overlay opacity
+    region_type: RegionType;
+    signal_type: string;      // e.g. "face_visible", "indian_id_aadhaar"
+    colour: string;      // hex e.g. "#FF6B6B"
+}
+
+/**
+ * Heatmap overlay data for the privacy visualisation layer.
+ * Mirrors HeatmapData from schemas/analysis.py.
+ */
+export interface HeatmapData {
+    success: boolean;
+    image_width: number;
+    image_height: number;
+    cells: HeatmapCell[];
+    error: string | null;
+}
+
 export interface AnalysisResponse {
     success: true;
     session_id: string;
@@ -413,8 +449,8 @@ export interface AnalysisResponse {
     // Week 5 — risk scoring
     risk: RiskSummary | null;
 
-    // Week 6+ — heatmap data (future)
-    // heatmap?: HeatmapData
+    // Week 6 — heatmap overlay
+    heatmap: HeatmapData | null;
 
     // Week 7+ — protection results (future)
     // protection?: ProtectionSummary

@@ -114,6 +114,8 @@ from app.schemas.analysis import (
     ClassificationSummary,
     CategoryRiskSchema,
     RiskSummary,
+    HeatmapCellSchema,
+    HeatmapData,
 )
 
 from app.pipeline.detection.detection_engine import DetectionEngine
@@ -122,6 +124,7 @@ from app.pipeline.classification.signal_classification import SignalClassificati
 from app.pipeline.analysis.signal_correlation import SignalCorrelationEngine
 from app.pipeline.analysis.exposure_analysis import ExposureAnalysisEngine
 from app.pipeline.analysis.risk_scoring import RiskScoringEngine
+from app.pipeline.visualisation.heatmap_engine import HeatmapEngine
 
 from app.core.logging import get_logger
 
@@ -342,9 +345,7 @@ async def analyze(
         f"success={detection_result.success} | "
         f"faces={detection_result.face_count} | "
         f"qr={detection_result.qr_count} | "
-        f"text={detection_result.text_count} | "
-       #f"signals={classification_result.total} | "
-        #f"risk={risk_result.overall_level} ({risk_result.overall_score})"
+        f"text={detection_result.text_count}"
     )
 
     # ── STEP 7: Signal Classification ────────────────────────────
@@ -391,7 +392,23 @@ async def analyze(
         f"overall={risk_result.overall_score} ({risk_result.overall_level})"
     )
 
-    # ── STEP 11: Build the API Response ───────────────────────────
+    # ── STEP 11: Heatmap Generation ───────────────────────────────
+    heatmap_engine = HeatmapEngine()
+    heatmap_result = heatmap_engine.generate(
+        regions=detection_result.regions,
+        classification=classification_result,
+        risk=risk_result,
+        image_width=detection_result.image_width,
+        image_height=detection_result.image_height,
+    )
+
+    logger.info(
+        f"Analyze endpoint: heatmap done | "
+        f"session={session.session_id} | "
+        f"cells={len(heatmap_result.cells)}"
+    )
+
+    # ── STEP 12: Build the API Response ───────────────────────────
     # Construct MetadataSummary from extraction results.
     metadata_summary = MetadataSummary(
         extraction_success=raw_metadata.extraction_success,
@@ -472,6 +489,24 @@ async def analyze(
         error=risk_result.error,
     )
 
+    heatmap_data = HeatmapData(
+        success=heatmap_result.success,
+        image_width=heatmap_result.image_width,
+        image_height=heatmap_result.image_height,
+        cells=[
+            HeatmapCellSchema(
+                x=c.x, y=c.y,
+                width=c.width, height=c.height,
+                intensity=c.intensity,
+                region_type=c.region_type,
+                signal_type=c.signal_type,
+                colour=c.colour,
+            )
+            for c in heatmap_result.cells
+        ],
+        error=heatmap_result.error,
+    )
+
     response = AnalysisResponse(
         success=True,
         session_id=session.session_id,
@@ -492,6 +527,7 @@ async def analyze(
         detection=detection_summary,
         classification=classification_summary,
         risk=risk_summary,
+        heatmap=heatmap_data,
     )
 
     logger.info(

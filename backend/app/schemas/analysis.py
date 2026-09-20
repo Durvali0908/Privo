@@ -360,6 +360,12 @@ class AnalysisResponse(BaseModel):
         )
     )
 
+    # ── WEEK 6 ────────────────────────────────────────────────────
+    heatmap: Optional["HeatmapData"] = Field(
+        default=None,
+        description="Heatmap overlay cells for the privacy visualisation layer."
+    )
+
 # ─────────────────────────────────────────────────────────────────
 # WEEK 3 — DETECTION SCHEMAS
 # ─────────────────────────────────────────────────────────────────
@@ -456,6 +462,38 @@ class RiskSummary(BaseModel):
     category_risks:    List[CategoryRiskSchema] = Field(default_factory=list)
     dominant_category: Optional[str] = None
     error:             Optional[str] = None
+
+
+
+# ─────────────────────────────────────────────────────────────────
+# WEEK 6 — HEATMAP SCHEMAS
+# ─────────────────────────────────────────────────────────────────
+
+class HeatmapCellSchema(BaseModel):
+    """One overlay cell. Mirrors HeatmapCell from heatmap_engine.py."""
+    x:           int
+    y:           int
+    width:       int
+    height:      int
+    intensity:   float       # 0.0–1.0
+    region_type: str         # "face" | "qr_code" | "text"
+    signal_type: str         # e.g. "face_visible"
+    colour:      str         # hex e.g. "#FF6B6B"
+
+
+class HeatmapData(BaseModel):
+    """
+    Heatmap overlay data for the frontend renderer.
+    Mirrors HeatmapResult from heatmap_engine.py.
+
+    The frontend scales (x, y, width, height) from image coordinates
+    to screen coordinates using image_width / image_height.
+    """
+    success:      bool
+    image_width:  int   = Field(default=0)
+    image_height: int   = Field(default=0)
+    cells:        List[HeatmapCellSchema] = Field(default_factory=list)
+    error:        Optional[str] = None
 
 
 # Rebuild AnalysisResponse to pick up all forward references
