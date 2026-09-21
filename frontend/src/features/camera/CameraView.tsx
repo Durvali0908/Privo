@@ -21,6 +21,8 @@ import {
 import { CameraView as ExpoCameraView } from "expo-camera";
 
 import { useCamera } from "./useCamera";
+import { useCameraSession } from "./useCameraSession";
+import type { RiskSummary } from "../../types/analysis";
 import { SEVERITY_COLOURS, CATEGORY_LABELS, APP_NAME } from "../../lib/constants";
 import {
     getCategoryLabel,
@@ -58,7 +60,7 @@ function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => voi
     return (
         <View style={styles.centeredScreen}>
             <Text style={styles.errorEmoji}>⚠️</Text>
-            <Text style={styles.errorText}>{message}</Text>
+            <Text style={styles.centeredErrorText}>{message}</Text>
             <TouchableOpacity style={styles.primaryButton} onPress={onRetry} activeOpacity={0.8}>
                 <Text style={styles.primaryButtonText}>Try Again</Text>
             </TouchableOpacity>
@@ -78,6 +80,59 @@ function SeverityBadge({ severity }: { severity: string }) {
     );
 }
 
+
+const RISK_COLOURS: Record<string, { bg: string; text: string; border: string }> = {
+    low: { bg: "#0F2010", text: "#4ADE80", border: "#166534" },
+    medium: { bg: "#2D1B00", text: "#FFB347", border: "#7A4500" },
+    high: { bg: "#3B0000", text: "#FF6B6B", border: "#7F0000" },
+    critical: { bg: "#1A0000", text: "#FF2020", border: "#5C0000" },
+};
+
+function RiskSection({ risk }: { risk: RiskSummary }) {
+    if (!risk.success) return null;
+    const c = RISK_COLOURS[risk.overall_level] ?? RISK_COLOURS.low;
+    return (
+        <View style={styles.section}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <Text style={styles.sectionTitle}>Risk</Text>
+                {risk.dominant_category && (
+                    <Text style={{ fontSize: 12, color: C.textSec }}>
+                        ⚑ {risk.dominant_category.replace("_", " ")}
+                    </Text>
+                )}
+            </View>
+            <View style={[{ borderRadius: 12, borderWidth: 1, paddingVertical: 14, alignItems: "center" },
+            { backgroundColor: c.bg, borderColor: c.border }]}>
+                <Text style={{ fontSize: 32, fontWeight: "800", color: c.text }}>
+                    {risk.overall_score.toFixed(1)}
+                </Text>
+                <Text style={{ fontSize: 12, fontWeight: "700", color: c.text, letterSpacing: 1 }}>
+                    {risk.overall_level.toUpperCase()} RISK
+                </Text>
+            </View>
+            {risk.category_risks.slice(0, 4).map((r, i) => {
+                const rc = RISK_COLOURS[r.level] ?? RISK_COLOURS.low;
+                return (
+                    <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                        <Text style={{ flex: 1, fontSize: 12, color: C.textSec }} numberOfLines={1}>
+                            {r.category.replace(/_/g, " ")}
+                        </Text>
+                        <View style={{ flex: 2, height: 4, backgroundColor: "#1E293B", borderRadius: 2, overflow: "hidden" }}>
+                            <View style={{
+                                height: "100%", width: `${(r.score / 10) * 100}%` as any,
+                                backgroundColor: rc.text, borderRadius: 2
+                            }} />
+                        </View>
+                        <Text style={{ fontSize: 12, fontWeight: "600", color: rc.text, minWidth: 28, textAlign: "right" }}>
+                            {r.score.toFixed(1)}
+                        </Text>
+                    </View>
+                );
+            })}
+        </View>
+    );
+}
+
 function ResultsSection({ result }: { result: NonNullable<ReturnType<typeof useCamera>["result"]> }) {
     const metaFindings = result.metadata?.findings ?? [];
     const sorted = sortFindingsBySeverity(metaFindings);
@@ -93,6 +148,9 @@ function ResultsSection({ result }: { result: NonNullable<ReturnType<typeof useC
                 <Text style={styles.pipelineLabel}>Analysis Complete</Text>
                 <Text style={styles.pipelineStatus}>{result.status.toUpperCase()}</Text>
             </View>
+
+            {/* Risk assessment */}
+            {result.risk && <RiskSection risk={result.risk} />}
 
             {/* Detection summary */}
             {detection && (
@@ -169,8 +227,23 @@ export function PrivoCameraView() {
         handleCapture,
         handleRetake,
         handleAnalyze,
+        handleProceedToProtect,
+        handleSkipProtection,
+        handleSave,
         handleReset,
     } = useCamera();
+
+    const { saving, saveError, savedUri, save } = useCameraSession();
+
+    // Called when user confirms save
+    const onSave = async () => {
+        if (!result) return;
+        await handleSave();          // sets screenState → "saving"
+        const ok = await save(capturedUri!, result);
+        if (ok) {
+            // stay on "saved" — parent resets on "Capture Another"
+        }
+    };
 
     return (
         <SafeAreaView style={styles.safeArea}>
@@ -208,7 +281,7 @@ export function PrivoCameraView() {
             )}
 
             {/* ── CAPTURED / ANALYSING / RESULT ──────────────────── */}
-            {(screenState === "captured" || screenState === "analysing" || screenState === "result") && (
+            {(screenState === "captured" || screenState === "analysing" || screenState === "result" || screenState === "protecting" || screenState === "saving" || screenState === "saved") && (
                 <ScrollView
                     style={styles.scrollView}
                     contentContainerStyle={styles.scrollContent}
@@ -244,13 +317,87 @@ export function PrivoCameraView() {
                     )}
 
                     {/* Result state */}
+                    {/* Result — show findings + protect/save actions */}
                     {screenState === "result" && result && (
                         <>
                             <ResultsSection result={result} />
-                            <TouchableOpacity style={styles.resetButton} onPress={handleReset} activeOpacity={0.7}>
+                            <View style={styles.resultActions}>
+                                <TouchableOpacity
+                                    style={styles.primaryButton}
+                                    onPress={handleProceedToProtect}
+                                    activeOpacity={0.8}
+                                >
+                                    <Text style={styles.primaryButtonText}>Review & Protect</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.secondaryButton}
+                                    onPress={handleSkipProtection}
+                                    activeOpacity={0.7}
+                                >
+                                    <Text style={styles.secondaryButtonText}>Save as-is</Text>
+                                </TouchableOpacity>
+                            </View>
+                        </>
+                    )}
+
+                    {/* Protecting — placeholder until Week 7 */}
+                    {screenState === "protecting" && result && (
+                        <View style={styles.protectContainer}>
+                            <Text style={styles.sectionTitle}>Protection</Text>
+                            <View style={styles.warningBox}>
+                                <Text style={styles.warningText}>
+                                    Protection tools arrive in a future update.{" "}
+                                    You can save the image as-is or retake.
+                                </Text>
+                            </View>
+                            <View style={styles.resultActions}>
+                                <TouchableOpacity
+                                    style={styles.primaryButton}
+                                    onPress={onSave}
+                                    activeOpacity={0.8}
+                                >
+                                    <Text style={styles.primaryButtonText}>Save to Privo Gallery</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.secondaryButton}
+                                    onPress={handleRetake}
+                                    activeOpacity={0.7}
+                                >
+                                    <Text style={styles.secondaryButtonText}>Discard & Retake</Text>
+                                </TouchableOpacity>
+                            </View>
+                            {saveError && (
+                                <View style={styles.errorBox}>
+                                    <Text style={styles.errorText}>{saveError}</Text>
+                                </View>
+                            )}
+                        </View>
+                    )}
+
+                    {/* Saving spinner */}
+                    {screenState === "saving" && (
+                        <View style={styles.analysingRow}>
+                            <ActivityIndicator size="small" color="#8B5CF6" />
+                            <Text style={styles.analysingText}>Saving to Privo Gallery...</Text>
+                        </View>
+                    )}
+
+                    {/* Saved confirmation */}
+                    {screenState === "saved" && (
+                        <View style={styles.savedContainer}>
+                            <Text style={styles.savedIcon}>✅</Text>
+                            <Text style={styles.savedTitle}>Saved to Privo Gallery</Text>
+                            <Text style={styles.savedSubtitle}>
+                                This image is now in your Privo Gallery.
+                            </Text>
+                            <TouchableOpacity
+                                style={styles.resetButton}
+                                onPress={handleReset}
+                                activeOpacity={0.7}
+                            >
                                 <Text style={styles.resetButtonText}>Capture Another</Text>
                             </TouchableOpacity>
-                        </>
+                        </View>
                     )}
                 </ScrollView>
             )}
@@ -299,7 +446,7 @@ const styles = StyleSheet.create({
     errorEmoji: { fontSize: 40 },
     permissionTitle: { fontSize: 18, fontWeight: "700", color: C.text, textAlign: "center" },
     permissionBody: { fontSize: 14, color: C.textSec, textAlign: "center", lineHeight: 22 },
-    errorText: { fontSize: 14, color: C.errorText, textAlign: "center", lineHeight: 22 },
+    centeredErrorText: { fontSize: 14, color: C.errorText, textAlign: "center", lineHeight: 22 },
 
     // Viewfinder
     viewfinderContainer: { flex: 1 },
@@ -348,6 +495,17 @@ const styles = StyleSheet.create({
     secondaryButtonText: { color: C.textSec, fontSize: 15 },
     resetButton: { paddingVertical: 16, alignItems: "center", marginTop: 8 },
     resetButtonText: { color: C.textSec, fontSize: 14 },
+    resultActions: { gap: 10, marginTop: 12 },
+    protectContainer: { gap: 12, paddingTop: 8 },
+    savedContainer: { alignItems: "center", gap: 12, paddingVertical: 32 },
+    savedIcon: { fontSize: 48 },
+    savedTitle: { fontSize: 18, fontWeight: "700", color: C.text },
+    savedSubtitle: { fontSize: 14, color: C.textSec, textAlign: "center" },
+    errorBox: {
+        backgroundColor: C.errorBg, borderWidth: 1,
+        borderColor: C.errorBorder, borderRadius: 10, padding: 12,
+    },
+    errorText: { fontSize: 13, color: C.errorText, lineHeight: 20 },
 
     // Results
     resultsContainer: { gap: 12 },
