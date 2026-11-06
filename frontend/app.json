@@ -17,7 +17,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.frontend"
+      "package": "com.privo.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -25,6 +25,12 @@
     "plugins": [
       "expo-sqlite",
       "expo-router"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f8ee7201-bd3a-44b3-80a6-e94b7525d189"
+      }
+    }
   }
 }
