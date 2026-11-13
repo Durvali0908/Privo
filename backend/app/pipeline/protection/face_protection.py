@@ -54,7 +54,9 @@ class FaceProtection:
             try:
                 result = self._protect_region(result, region, mode)
             except Exception as exc:
-                logger.error(f"Face protection error on region: {exc}")
+                # Fail closed: an unprotected face must never pass as protected.
+                logger.error(f"Face protection error on region ({exc}) — masking region instead")
+                result = self._mask_fallback(result, region)
 
         logger.info(
             f"Face Protection: applied {mode.value} to "
@@ -90,7 +92,7 @@ class FaceProtection:
             pixel_size = max(8, roi_w // 10)
             small = cv2.resize(
                 roi,
-                (roi_w // pixel_size, roi_h // pixel_size),
+                (max(1, roi_w // pixel_size), max(1, roi_h // pixel_size)),
                 interpolation=cv2.INTER_LINEAR,
             )
             protected = cv2.resize(
@@ -106,4 +108,12 @@ class FaceProtection:
             return image
 
         image[y1:y2, x1:x2] = protected
+        return image
+
+    def _mask_fallback(self, image: np.ndarray, region: DetectedRegion) -> np.ndarray:
+        h, w = image.shape[:2]
+        x1, y1 = max(0, region.x), max(0, region.y)
+        x2, y2 = min(w, region.x + region.width), min(h, region.y + region.height)
+        if x2 > x1 and y2 > y1:
+            image[y1:y2, x1:x2] = 0
         return image

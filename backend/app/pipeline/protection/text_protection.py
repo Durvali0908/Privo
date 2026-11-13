@@ -54,7 +54,13 @@ class TextProtection:
             try:
                 result = self._protect_region(result, region, mode)
             except Exception as exc:
-                logger.error(f"Text protection error on region: {exc}")
+                # Fail closed: redact the region rather than leave text readable.
+                logger.error(f"Text protection error on region ({exc}) — redacting region instead")
+                h, w = result.shape[:2]
+                x1, y1 = max(0, region.x - 2), max(0, region.y - 2)
+                x2, y2 = min(w, region.x + region.width + 2), min(h, region.y + region.height + 2)
+                if x2 > x1 and y2 > y1:
+                    result[y1:y2, x1:x2] = 0
 
         logger.info(
             f"Text Protection: applied {mode.value} to "

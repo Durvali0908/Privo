@@ -99,6 +99,7 @@ from fastapi import APIRouter
 # all endpoint sub-routers under the /api/v1 prefix.
 
 from app.api.v1.endpoints import analyze
+from app.api.v1.endpoints import protect
 # analyze: The analyze endpoint module.
 # We import the module (not just the router) so the import is
 # explicit about which file it comes from.
@@ -170,6 +171,12 @@ v1_router.include_router(
     # API documentation structure.
 )
 
+v1_router.include_router(
+    protect.router,
+    prefix="",
+    tags=["Protection"]
+)
+
 # ─── Future routers (not yet implemented) ─────────────────────────
 # Add each new endpoint file here when its week arrives.
 # The pattern is always the same two lines:
@@ -180,14 +187,11 @@ v1_router.include_router(
 # from app.api.v1.endpoints import session
 # v1_router.include_router(session.router, prefix="", tags=["Session"])
 #
-# from app.api.v1.endpoints import protect
-# v1_router.include_router(protect.router, prefix="", tags=["Protection"])
-#
 # from app.api.v1.endpoints import gallery
 # v1_router.include_router(gallery.router, prefix="", tags=["Gallery"])
 # ──────────────────────────────────────────────────────────────────
 
-logger.debug("API v1 router assembled — routes registered: /api/v1/analyze")
+logger.debug("API v1 router assembled — routes registered: /api/v1/analyze, /api/v1/session/{session_id}/protect")
 # This log line runs when the module is first imported (at startup).
 # If you see it in the terminal, the router assembled without errors.
 # Future: update this message as new routes are added.
