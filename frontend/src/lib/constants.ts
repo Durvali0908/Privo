@@ -55,7 +55,7 @@
  * To switch between USB and WiFi:
  *   Change this one constant. No other file needs to change.
  */
-export const API_BASE_URL = "http://localhost:8000";
+export const API_BASE_URL = "http://127.0.0.1:8000";
 
 /**
  * API version prefix. Matches backend router.py prefix="/api/v1".

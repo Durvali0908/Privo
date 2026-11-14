@@ -2,16 +2,25 @@ Terminal 1 — Backend
 cd D:\PrivoCEP\backend
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+*** WHEN UPDATE IN BACKEND ***
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
 
 Terminal 2 — ADB
 adb devices
+adb pair 192.168.137.139:43685 ## replace Ip and port with pairing dialog
+adb connect 192.168.137.139:37123 ## with actual ip and port
+
+adb -s 192.168.1.11:42085 reverse tcp:8000 tcp:8000
 adb reverse tcp:8000 tcp:8000
-adb reverse tcp:8081 tcp:8081
+adb reverse --list
+** if error then only  = error: more than one device/emulator
+adb -s 192.168.1.11:42085 reverse tcp:8000 tcp:8000
 
-Terminal 3 — Frontend
+
+*** WHEN UPDATE IN FRONTEND ***
 cd D:\PrivoCEP\frontend
-npx expo start
+eas build --platform android --profile preview
 
-Phone
-Open Expo Go → open the Privo project.
+
 
